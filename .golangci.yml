@@ -1,0 +1,37 @@
+# golangci-lint configuration for selftunnel.
+#
+# Run: make lint
+#   or: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run
+#
+# On top of the default set (errcheck, govet, ineffassign, staticcheck,
+# unused) this enables misspell and unconvert, and uses depguard to turn
+# the dependency whitelist of spec §1 into a machine-enforced rule.
+version: "2"
+
+linters:
+  enable:
+    - misspell   # catches typos in comments and strings
+    - unconvert  # flags redundant type conversions
+    - depguard   # enforces the spec §1 dependency whitelist
+
+  settings:
+    depguard:
+      rules:
+        main:
+          allow:
+            - $gostd
+            - selftunnel                  # this module's own packages
+            - github.com/gorilla/websocket
+            - fyne.io/fyne/v2             # GUI client only (spec §1)
+
+    errcheck:
+      # Ignored by policy: errors from deferred/teardown Close calls are
+      # unactionable, and a failed mid-stream ResponseWriter.Write surfaces
+      # through the surrounding request anyway. Everything else must be
+      # handled (or explicitly discarded with `_ =`). The gorilla type is
+      # listed separately because errcheck matches the static receiver type,
+      # and *websocket.Conn.Close is a concrete method, not the interface.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*github.com/gorilla/websocket.Conn).Close
+        - (net/http.ResponseWriter).Write

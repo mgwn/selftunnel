@@ -1,0 +1,21 @@
+# All-in-one: builds the server (golang stage) and runs it in a minimal scratch image.
+#
+#   docker compose up --build
+
+services:
+  selftunnel-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: selftunnel:latest
+    container_name: selftunnel
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    # For TLS/WSS, mount certificates and override the command:
+    # command: ["-addr", ":443", "-data", "/data", "-cert", "/certs/server.crt", "-key", "/certs/server.key"]
+    # volumes:
+    #   - ./data:/data
+    #   - ./certs:/certs:ro

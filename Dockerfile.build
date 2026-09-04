@@ -1,0 +1,24 @@
+# Standalone build environment for selftunnel.
+# Produces a statically-linked ./selftunnel-server-linux binary in the image.
+#
+# Usage:
+#   docker build -f Dockerfile.build -t selftunnel:builder .
+#   docker create --name extract selftunnel:builder
+#   docker cp extract:/src/selftunnel-server-linux ./selftunnel-server-linux
+#   docker rm extract
+
+# Pinned to the exact toolchain of go.mod, so no toolchain download or
+# switching happens inside the image.
+FROM golang:1.26.8-alpine
+WORKDIR /src
+
+RUN apk add --no-cache git ca-certificates
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -a -installsuffix cgo \
+    -ldflags='-w -s' \
+    -o selftunnel-server-linux ./cmd/selftunnel-server

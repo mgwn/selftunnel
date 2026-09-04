@@ -1,0 +1,49 @@
+# OpenKnowledge regenerates its built-in project skill on every open, and
+# different app builds version-stamp it differently. It is a per-machine
+# artifact — keep it out of git so teammates don't collide under auto-sync.
+.claude/skills/open-knowledge/
+.cursor/skills/open-knowledge/
+.codex/skills/open-knowledge/
+.github/skills/open-knowledge/
+.opencode/skills/open-knowledge/
+.pi/skills/open-knowledge/
+
+# Local AI-tooling / workspace state (not part of the project)
+.claude/
+.cursor/
+.codex/
+.ok/
+.okignore
+.mcp.json
+
+# Compiled binaries (go build / build.sh outputs).
+# Anchored with a leading "/" so the cmd/<name>/ source directories stay tracked.
+/selftunnel-server
+/selftunnel-server-linux
+/selftunnel-client
+/selftunnel-client-gui
+/selftunnel-client.exe
+
+# Build output directory
+/dist/
+
+# Project-local pinned dev tools (make lint / pre-commit install golangci-lint here)
+/.gobin/
+
+# Client-local config (contains the tunnel secret) and server runtime data
+/config.json
+/data/
+
+# Go test and coverage artifacts
+*.test
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+*.swp
+*.swo
+.idea/
+.vscode/

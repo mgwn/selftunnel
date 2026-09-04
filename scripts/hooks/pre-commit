@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Pre-commit checks for selftunnel (see AGENTS.md, "Verification").
+#
+# Stages, in order — any failure blocks the commit:
+#   0. spec-sync gate  — Go changes must ship with a specs/ change, or an
+#                        explicit SPEC_SYNC=1 assertion of behaviour-neutrality
+#   1. gofmt           — `gofmt -l .` must print nothing
+#   2. go vet          — must pass
+#   3. lint            — golangci-lint (depguard enforces the dependency
+#                        whitelist); downloads the tool on first use
+#   4. race+coverage   — full suite under -race; ≥70% of ./internal/...
+#                        (tests/pipeline/coverage.sh, COVERAGE_MIN overrides)
+#   5. crosscompile    — CGO-free builds on windows/linux/darwin (amd64+arm64)
+#   6. smoke           — real-binary smoke test (tests/pipeline/smoke.sh)
+#
+# Escape hatches (use sparingly, never to land a red change):
+#   SPEC_SYNC=1     this Go change is behaviour-neutral (refactor/comments)
+#   SKIP_LINT=1     skip golangci-lint (e.g. offline)
+#   SKIP_RACE=1     skip the race+coverage gate
+#   SKIP_XCOMPILE=1 skip cross-compilation
+#   SKIP_SMOKE=1    skip the smoke test
+#   git commit --no-verify skips everything (CI re-runs it all on push)
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# --- 0. spec-sync gate ------------------------------------------------------
+
+if git diff --cached --name-only | grep -qE '\.go$|^go\.(mod|sum)$'; then
+  if ! git diff --cached --name-only | grep -qE '^specs/'; then
+    if [ "${SPEC_SYNC:-0}" != "1" ]; then
+      cat >&2 <<'EOF'
+pre-commit: Go changes staged without a specs/ change.
+
+SDD rule (AGENTS.md): behaviour changes are spec-first — stage the updates
+to specs/selftunnel-Spec.md and specs/selftunnel-Spec_CN.md together with
+the code. If this change is provably behaviour-neutral (pure refactor,
+comments, tests only), re-run with:  SPEC_SYNC=1 git commit ...
+EOF
+      exit 1
+    fi
+  fi
+fi
+
+# --- 1-2. fast static gates --------------------------------------------------
+
+if ! git diff --cached --name-only | grep -qE '\.go$|^go\.(mod|sum)$'; then
+  echo "pre-commit: no Go changes staged, skipping Go checks"
+  exit 0
+fi
+
+echo "pre-commit: [1/6] gofmt"
+UNFORMATTED="$(gofmt -l .)"
+if [ -n "$UNFORMATTED" ]; then
+  echo "pre-commit: FAIL — these files need gofmt (-w):" >&2
+  echo "$UNFORMATTED" >&2
+  exit 1
+fi
+
+echo "pre-commit: [2/6] go vet ./..."
+go vet ./...
+
+# --- 3. lint -----------------------------------------------------------------
+
+if [ "${SKIP_LINT:-0}" = "1" ]; then
+  echo "pre-commit: [3/6] lint SKIPPED (SKIP_LINT=1)"
+else
+  echo "pre-commit: [3/6] golangci-lint"
+  if [ ! -x .gobin/golangci-lint ]; then
+    echo "pre-commit: installing pinned golangci-lint v2.13.2 into .gobin (first run)"
+    GOBIN="$PWD/.gobin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+  fi
+  # GOTOOLCHAIN pins the analysis toolchain (the local go may be older
+  # than go.mod requires); an exact version uses the module cache without
+  # any proxy round-trips once downloaded.
+  GOTOOLCHAIN=go1.26.8 .gobin/golangci-lint run
+fi
+
+# --- 4. race + coverage gate ---------------------------------------------------
+
+if [ "${SKIP_RACE:-0}" = "1" ]; then
+  echo "pre-commit: [4/6] race+coverage SKIPPED (SKIP_RACE=1)"
+else
+  echo "pre-commit: [4/6] race + coverage gate"
+  bash tests/pipeline/coverage.sh >/dev/null
+  echo "pre-commit: race + coverage gate passed"
+fi
+
+# --- 5. cross-compilation ------------------------------------------------------
+
+if [ "${SKIP_XCOMPILE:-0}" = "1" ]; then
+  echo "pre-commit: [5/6] crosscompile SKIPPED (SKIP_XCOMPILE=1)"
+else
+  echo "pre-commit: [5/6] crosscompile"
+  bash tests/pipeline/crosscompile.sh >/dev/null
+  echo "pre-commit: crosscompile passed"
+fi
+
+# --- 6. smoke ------------------------------------------------------------------
+
+if [ "${SKIP_SMOKE:-0}" = "1" ]; then
+  echo "pre-commit: [6/6] smoke SKIPPED (SKIP_SMOKE=1)"
+else
+  echo "pre-commit: [6/6] smoke test"
+  bash tests/pipeline/smoke.sh >/dev/null
+  echo "pre-commit: smoke SMOKE PASS"
+fi
+
+echo "pre-commit: all checks passed"

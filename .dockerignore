@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Client-local config (contains the tunnel secret) and runtime data
+config.json
+data/
+
+# Local certs are mounted at runtime, never baked into the image
+certs/
+
+# Not needed in the server build context
+dist/
+extension/
+extension.zip
+README.md
+README_CN.md
+specs/
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
+Makefile
+build.sh
+docker-compose.yml
+docker-compose.runtime.yml
+.github/
+
+# Local binaries: Dockerfile and Dockerfile.build compile from source.
+# selftunnel-server-linux is intentionally NOT excluded here — Dockerfile.runtime COPYs it.
+selftunnel-server
+selftunnel-client
+selftunnel-client-gui
+selftunnel-client.exe
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+*.swp
+*.swo
+.idea/
+.vscode/

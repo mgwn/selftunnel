@@ -1,0 +1,19 @@
+# Minimal runtime image for selftunnel.
+# Requires a pre-built ./selftunnel-server-linux binary in the build context.
+#
+# Usage:
+#   ./build.sh
+#   docker build -f Dockerfile.runtime -t selftunnel:latest .
+#   docker run -d -p 8080:8080 -v $(pwd)/data:/data --name selftunnel selftunnel:latest
+
+FROM scratch
+WORKDIR /app
+
+# The binary must be statically linked (CGO_ENABLED=0) to run in scratch.
+COPY selftunnel-server-linux /app/selftunnel-server
+
+USER 65532:65532
+EXPOSE 8080
+
+ENTRYPOINT ["/app/selftunnel-server"]
+CMD ["-addr", ":8080", "-data", "/data"]
