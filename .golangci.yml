@@ -20,7 +20,7 @@ linters:
         main:
           allow:
             - $gostd
-            - selftunnel                  # this module's own packages
+            - github.com/mgwn/selftunnel      # this module's own packages
             - github.com/gorilla/websocket
             - fyne.io/fyne/v2             # GUI client only (spec §1)
 

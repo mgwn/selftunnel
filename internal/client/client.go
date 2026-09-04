@@ -26,7 +26,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"selftunnel/internal/proto"
+	"github.com/mgwn/selftunnel/internal/proto"
 )
 
 // Client tuning constants (spec §3.5, §6.3):

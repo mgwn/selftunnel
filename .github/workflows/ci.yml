@@ -15,6 +15,12 @@ jobs:
         with:
           go-version: '1.26.8'
 
+      - name: Install GUI build dependencies
+        # The Fyne GUI client is part of ./... for lint/vet/test; its cgo
+        # dependencies (OpenGL, X11, Wayland) need these dev packages on
+        # headless runners. See scripts/ci/gui-deps.sh for the package map.
+        run: bash scripts/ci/gui-deps.sh
+
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 

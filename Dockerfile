@@ -1,11 +1,16 @@
 # Multi-stage Dockerfile for selftunnel.
-#   docker build --target build-env -t selftunnel:build .
 #   docker build -t selftunnel:latest .
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t mgwn/selftunnel:latest --push .
 
 # ---- build environment ----
+# --platform=$BUILDPLATFORM keeps this stage on the runner's native
+# architecture; TARGETARCH makes the Go cross-compiler emit the target
+# binary, so multi-arch builds need no QEMU emulation.
 # Pinned to the exact toolchain of go.mod, so no toolchain download or
 # switching happens inside the image.
-FROM golang:1.26.8-alpine AS build-env
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine AS build-env
+ARG TARGETARCH
 WORKDIR /src
 
 # Install git for fetching private modules if needed, and ca-certificates.
@@ -15,7 +20,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags='-w -s' \
     -o selftunnel-server ./cmd/selftunnel-server
 

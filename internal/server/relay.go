@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"selftunnel/internal/proto"
+	"github.com/mgwn/selftunnel/internal/proto"
 )
 
 // relayTimeout bounds the wait for the first response frame (spec §3.2

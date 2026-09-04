@@ -13,7 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"selftunnel/internal/proto"
+	"github.com/mgwn/selftunnel/internal/proto"
 )
 
 // Server is the relay HTTP/WebSocket server. It owns the tunnel registry,

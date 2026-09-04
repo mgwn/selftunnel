@@ -1,0 +1,170 @@
+name: Release
+
+# Publishing a release on GitHub (this also creates the tag if it does not
+# exist yet) triggers this workflow:
+#
+#   gh release create v0.1.0 --title "selftunnel 0.1.0" --generate-notes
+#
+#   1. verify  — run the full quality gate on the tagged commit
+#   2. build   — cross-compile the server, CLI client and GUI client for
+#                every supported platform (see the matrix below; GUI
+#                platform rules live in scripts/release/build.sh)
+#   3. docker  — push the multi-arch server image to Docker Hub
+#   4. publish — attach the artifacts and SHA-256 checksums to the
+#                already-published release
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.8'
+
+      - name: Install GUI build dependencies
+        run: bash scripts/ci/gui-deps.sh
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Lint
+        run: |
+          GOBIN="$PWD/.gobin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+          GOTOOLCHAIN=go1.26.8 .gobin/golangci-lint run
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race + coverage gate
+        run: bash tests/pipeline/coverage.sh
+
+      - name: Cross-compile gate
+        run: bash tests/pipeline/crosscompile.sh
+
+      - name: Smoke test
+        run: bash tests/pipeline/smoke.sh
+
+  build:
+    needs: verify
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # GUI constraints drive the runner choice: linux GUIs build
+        # natively (arm64 on the free arm runners), darwin GUIs build on
+        # macOS, the windows GUI cross-compiles from Linux via mingw-w64.
+        include:
+          - goos: linux
+            goarch: amd64
+            runs-on: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            runs-on: ubuntu-24.04-arm
+          - goos: darwin
+            goarch: amd64
+            runs-on: macos-latest
+          - goos: darwin
+            goarch: arm64
+            runs-on: macos-latest
+          - goos: windows
+            goarch: amd64
+            runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.8'
+
+      - name: Install GUI build dependencies (linux)
+        if: matrix.goos == 'linux'
+        run: bash scripts/ci/gui-deps.sh
+
+      - name: Install mingw-w64 (windows cross-compile)
+        if: matrix.goos == 'windows'
+        run: sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build artifacts
+        run: bash scripts/release/build.sh "${{ matrix.goos }}" "${{ matrix.goarch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selftunnel-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  docker:
+    # Pushes the multi-arch server image to Docker Hub, tagged with the
+    # release version and :latest. Requires the repo secrets
+    # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (access token, Read & Write).
+    # The Dockerfile cross-compiles via TARGETARCH, so no QEMU is needed.
+    needs: verify
+    name: push server image to Docker Hub
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: uoks/selftunnel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.event.release.tag_name }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    needs: build
+    name: attach artifacts to the release
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      # pattern filters to the platform artifacts only — the docker job
+      # also uploads a buildx provenance artifact (*.dockerbuild) to the
+      # run, which must not end up in the release assets or checksums.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: selftunnel-*
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          ls -l
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # gh resolves the target repo from the local git remote by
+          # default; this job never checks out the repository, so tell it
+          # explicitly instead.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # The release already exists (it triggered this workflow);
+          # --clobber makes workflow re-runs overwrite the assets.
+          gh release upload "$TAG" dist/* --clobber

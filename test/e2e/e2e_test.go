@@ -31,8 +31,8 @@ import (
 	"testing"
 	"time"
 
-	"selftunnel/internal/client"
-	"selftunnel/internal/server"
+	"github.com/mgwn/selftunnel/internal/client"
+	"github.com/mgwn/selftunnel/internal/server"
 )
 
 // httpClient bounds every e2e request so a hung relay fails the test

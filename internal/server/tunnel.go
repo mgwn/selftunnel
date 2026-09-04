@@ -10,7 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"selftunnel/internal/proto"
+	"github.com/mgwn/selftunnel/internal/proto"
 )
 
 // Session tuning constants (spec §3.1, §6.1):

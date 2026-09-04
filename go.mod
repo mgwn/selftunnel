@@ -1,4 +1,4 @@
-module selftunnel
+module github.com/mgwn/selftunnel
 
 go 1.25.0
 

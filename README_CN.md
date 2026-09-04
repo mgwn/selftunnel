@@ -1,5 +1,13 @@
 # selftunnel
 
+[![CI](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml)
+[![Release pipeline](https://github.com/mgwn/selftunnel/actions/workflows/release.yml/badge.svg)](https://github.com/mgwn/selftunnel/actions/workflows/release.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mgwn/selftunnel.svg)](https://pkg.go.dev/github.com/mgwn/selftunnel)
+[![Release](https://img.shields.io/github/v/release/mgwn/selftunnel)](https://github.com/mgwn/selftunnel/releases)
+[![Downloads](https://img.shields.io/github/downloads/mgwn/selftunnel/total)](https://github.com/mgwn/selftunnel/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-informational.svg)](LICENSE)
+[![Go ≥ 1.25](https://img.shields.io/badge/go-%E2%89%A5%201.25-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+
 自托管的多租户**反向隧道 / 内网穿透**系统——[ngrok](https://ngrok.com)、[frp](https://github.com/fatedier/frp) 的轻量替代。把运行在内网或本机的任意 HTTP 服务暴露到公网服务器上的一个固定 URL，无需公网 IP、无需改路由器、无需域名备案。
 
 支持 **Windows / macOS / Linux**，服务端与客户端均为单二进制文件，**不需要管理员权限**即可运行。
@@ -205,6 +213,23 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags='-w -s' -o selftunnel-c
 > - **Linux**：无法从其他平台交叉编译，请在 Linux 本机或 Docker 中构建。
 > - 若只编译本机平台，直接 `go build ./cmd/selftunnel-client-gui` 即可。
 
+### 发布
+
+在 GitHub 上发布 release（若 tag 不存在会一并创建）即触发发布流水线：
+
+```bash
+gh release create v0.1.0 --title "selftunnel 0.1.0" --generate-notes
+```
+
+流水线对打标提交跑全量质量门槛，为所有支持的平台（linux/darwin/windows，amd64/arm64，遵守上述 GUI 平台规则）构建服务端、CLI 客户端与 GUI 客户端，附 SHA-256 校验和挂到该 release，并把多架构服务端镜像推送到 Docker Hub。
+
+服务端与 CLI 客户端也支持用 Go 直接安装：
+
+```bash
+go install github.com/mgwn/selftunnel/cmd/selftunnel-server@latest
+go install github.com/mgwn/selftunnel/cmd/selftunnel-client@latest
+```
+
 ---
 
 ## 配置说明
@@ -257,6 +282,14 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags='-w -s' -o selftunnel-c
 ---
 
 ## 部署到服务器
+
+### Docker
+
+每次发布都会向 [Docker Hub](https://hub.docker.com/r/uoks/selftunnel) 推送多架构服务端镜像（linux/amd64、linux/arm64），带版本号和 `latest` 标签：
+
+```bash
+docker run -d -p 8080:8080 -v $(pwd)/data:/data --name selftunnel uoks/selftunnel:latest
+```
 
 ### 使用 Docker Compose
 

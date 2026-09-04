@@ -15,7 +15,7 @@ import (
 	"os"
 	"strings"
 
-	"selftunnel/internal/server"
+	"github.com/mgwn/selftunnel/internal/server"
 )
 
 // main parses the flags, loads (or starts fresh) the tunnel registry and

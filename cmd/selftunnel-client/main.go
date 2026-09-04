@@ -24,7 +24,7 @@ import (
 	"strings"
 	"syscall"
 
-	"selftunnel/internal/client"
+	"github.com/mgwn/selftunnel/internal/client"
 )
 
 // main loads the config, applies flag overrides, validates the addresses

@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"selftunnel/internal/client"
+	"github.com/mgwn/selftunnel/internal/client"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"

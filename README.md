@@ -1,5 +1,13 @@
 # selftunnel
 
+[![CI](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml)
+[![Release pipeline](https://github.com/mgwn/selftunnel/actions/workflows/release.yml/badge.svg)](https://github.com/mgwn/selftunnel/actions/workflows/release.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mgwn/selftunnel.svg)](https://pkg.go.dev/github.com/mgwn/selftunnel)
+[![Release](https://img.shields.io/github/v/release/mgwn/selftunnel)](https://github.com/mgwn/selftunnel/releases)
+[![Downloads](https://img.shields.io/github/downloads/mgwn/selftunnel/total)](https://github.com/mgwn/selftunnel/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-informational.svg)](LICENSE)
+[![Go ≥ 1.25](https://img.shields.io/badge/go-%E2%89%A5%201.25-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+
 A self-hosted, multi-tenant **reverse tunnel** — a lightweight [ngrok](https://ngrok.com) / [frp](https://github.com/fatedier/frp) alternative that exposes any intranet or localhost HTTP service at a public URL. No public IP, no router changes, no domain registration required.
 
 Supports **Windows / macOS / Linux**. The server and clients are all single binaries and **do not require administrator privileges**.
@@ -202,6 +210,28 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags='-w -s' -o selftunnel-c
 > - **Linux**: cannot be cross-compiled from other platforms; build natively on Linux or in Docker.
 > - For the current platform only, `go build ./cmd/selftunnel-client-gui` is enough.
 
+### Releases
+
+Publishing a release on GitHub — which also creates the tag if it does not
+exist yet — triggers the release workflow:
+
+```bash
+gh release create v0.1.0 --title "selftunnel 0.1.0" --generate-notes
+```
+
+The workflow runs the full quality gate on the tagged commit, builds the
+server, the CLI client and the GUI client for every supported platform
+(linux/darwin/windows, amd64/arm64 — observing the GUI platform rules
+above), attaches them with SHA-256 checksums to the release, and pushes
+the multi-arch server image to Docker Hub.
+
+The server and CLI client can also be installed directly with Go:
+
+```bash
+go install github.com/mgwn/selftunnel/cmd/selftunnel-server@latest
+go install github.com/mgwn/selftunnel/cmd/selftunnel-client@latest
+```
+
 ---
 
 ## Configuration
@@ -254,6 +284,16 @@ The client configuration file is `config.json`, created automatically after the 
 ---
 
 ## Server Deployment
+
+### Docker
+
+Prebuilt multi-arch server images (linux/amd64, linux/arm64) are published
+to [Docker Hub](https://hub.docker.com/r/uoks/selftunnel) for every
+release, tagged with the version and `latest`:
+
+```bash
+docker run -d -p 8080:8080 -v $(pwd)/data:/data --name selftunnel uoks/selftunnel:latest
+```
 
 ### Docker Compose
 
