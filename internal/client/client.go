@@ -325,6 +325,12 @@ func (c *Client) connect(ctx context.Context) error {
 		}
 		return err
 	}
+	// A new connection supersedes any teardown of the previous one: re-arm
+	// the once-flag BEFORE publishing the new conn so close() tears THIS
+	// generation down properly (releasing the sleep inhibitor, sending the
+	// WS close frame). Without the reset, closed stayed true forever after
+	// the first disconnect and every later close() was a silent no-op.
+	c.closed.Store(false)
 	c.conn = conn
 
 	hello := &proto.Frame{

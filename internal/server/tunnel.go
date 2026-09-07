@@ -29,7 +29,9 @@ const (
 // pendingResp tracks one in-flight relayed request (spec §6.1): ch carries
 // the response frames to the consuming relay handler, done is closed by
 // UnregisterPending (or session close) so a routeResponse blocked on a full
-// ch can abort when the consumer goes away.
+// ch can abort when the consumer goes away. ch is NEVER closed: a
+// routeResponse that already looked the mailbox up may still be sending,
+// and a send on a closed channel panics — done is the sole teardown signal.
 type pendingResp struct {
 	ch   chan *proto.Frame
 	done chan struct{}
@@ -39,12 +41,17 @@ type pendingResp struct {
 // created per /ws/tunnel upgrade and runs entirely inside its HTTP handler
 // goroutine plus one writer goroutine (Run). Frames are only enqueued to
 // sendQ by other components; the writer is the sole sender on the wire.
+// done is closed exactly once by close(): it is the teardown signal for
+// the writer loop and for every blocked sender — sendQ itself is never
+// closed (a sender racing close() must not panic with "send on closed
+// channel"; it either enqueues harmlessly or aborts via done).
 type Session struct {
 	conn       *websocket.Conn
 	tun        *Tunnel
 	server     *Server
 	remoteAddr string
 	sendQ      chan []byte
+	done       chan struct{}
 	pending    map[uint32]*pendingResp
 	pendingMu  sync.RWMutex
 	nextID     atomic.Uint32
@@ -62,6 +69,7 @@ func newSession(conn *websocket.Conn, srv *Server, remoteAddr string) *Session {
 		server:     srv,
 		remoteAddr: remoteAddr,
 		sendQ:      make(chan []byte, sendQueueCap),
+		done:       make(chan struct{}),
 		pending:    make(map[uint32]*pendingResp),
 		writeDone:  make(chan struct{}),
 	}
@@ -151,7 +159,7 @@ func (s *Session) readLoop() {
 
 // writeLoop is the single goroutine that writes to the WebSocket (spec
 // §6.1): it drains sendQ, sends a keepalive ping every pingInterval, and
-// exits when sendQ is closed (session shutdown) or a write fails. Each
+// exits when the session is torn down (done closed) or a write fails. Each
 // write gets a 60s deadline — enough for a ~350KB base64 frame on a slow
 // link (v5.1: raised from 10s to stop killing slow-tunnel responses).
 func (s *Session) writeLoop() {
@@ -161,16 +169,19 @@ func (s *Session) writeLoop() {
 
 	for {
 		select {
-		case b, ok := <-s.sendQ:
-			if !ok {
-				_ = s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-				return
-			}
+		case b := <-s.sendQ:
 			_ = s.conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
 			if err := s.conn.WriteMessage(websocket.TextMessage, b); err != nil {
 				slog.Debug("tunnel write error", "tunnel", s.tunID(), "err", err)
 				return
 			}
+
+		case <-s.done:
+			// Teardown: best-effort close frame, then exit. Frames left
+			// in sendQ are abandoned with the session; senders unblock
+			// via done (sendQ is never closed, so no sender can panic).
+			_ = s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			return
 
 		case <-ticker.C:
 			if s.closed.Load() {
@@ -192,9 +203,12 @@ func (s *Session) send(f *proto.Frame) error {
 }
 
 // sendWithContext enqueues a frame for the writer goroutine, giving up when
-// ctx is done (queue full or caller cancelled). It never writes to the
-// connection directly. Callers on the relay path pass the request context
-// so a slow client cannot pin a handler past its deadline.
+// the session is torn down (done) or ctx is done (queue full or caller
+// cancelled). It never writes to the connection directly, and it never
+// panics on a racing close(): sendQ stays open, so a late enqueue either
+// lands harmlessly or this select takes the done branch. Callers on the
+// relay path pass the request context so a slow client cannot pin a
+// handler past its deadline.
 func (s *Session) sendWithContext(ctx context.Context, f *proto.Frame) error {
 	if s.closed.Load() {
 		return errors.New("session closed")
@@ -206,6 +220,8 @@ func (s *Session) sendWithContext(ctx context.Context, f *proto.Frame) error {
 	select {
 	case s.sendQ <- b:
 		return nil
+	case <-s.done:
+		return errors.New("session closed")
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -271,20 +287,22 @@ func (s *Session) routeResponse(f *proto.Frame) {
 }
 
 // close tears the session down exactly once: it closes the connection,
-// the send queue (ending the writer) and every pending mailbox (their
-// consumers see a nil frame and fail the request with 502), then marks
-// the tunnel offline in the registry and server counter.
+// signals done (ending the writer and every blocked sender) and closes the
+// done channel of every pending mailbox (their relay handlers see done and
+// fail the request with 502), then marks the tunnel offline in the registry
+// and server counter. Neither sendQ nor any pendingResp.ch is closed — a
+// sender that passed its lookup may still be sending, and closing the
+// channel under it would panic (spec §6.1: done is the abort signal).
 func (s *Session) close() {
 	if s.closed.Swap(true) {
 		return
 	}
 	s.conn.Close()
-	close(s.sendQ)
+	close(s.done)
 
 	s.pendingMu.Lock()
 	for _, pr := range s.pending {
 		close(pr.done)
-		close(pr.ch)
 	}
 	s.pending = make(map[uint32]*pendingResp)
 	s.pendingMu.Unlock()

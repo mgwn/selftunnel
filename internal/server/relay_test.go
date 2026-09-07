@@ -1,10 +1,379 @@
 package server
 
 import (
+	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/mgwn/selftunnel/internal/proto"
 )
+
+// --- relay handler integration tests (white-box) ---------------------------
+//
+// These tests drive handleRelay through a real httptest server with a
+// scripted WebSocket tunnel peer, so the two-stage timeout and session-
+// teardown paths (spec §3.2 step 4) are exercised without waiting the
+// production 120s/300s: relayTimeout/streamIdleTimeout are package vars
+// lowered per test (the tests never run t.Parallel, so the mutation is
+// safe; withRelayTimeouts restores the production values on cleanup).
+
+// testHTTPClient bounds every relay request in this file so a regression
+// that stalls the handler fails the test instead of hanging it.
+var testHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+// withRelayTimeouts installs per-test values for the two-stage timeout
+// (spec §3.2 step 4) and restores the production values on cleanup.
+func withRelayTimeouts(t *testing.T, firstFrame, idle time.Duration) {
+	t.Helper()
+	oldFirst, oldIdle := relayTimeout, streamIdleTimeout
+	relayTimeout, streamIdleTimeout = firstFrame, idle
+	t.Cleanup(func() { relayTimeout, streamIdleTimeout = oldFirst, oldIdle })
+}
+
+// relayEnv is a relay test harness: a real server plus one scripted
+// WebSocket tunnel peer (an online session bound to a fresh tunnel ID).
+type relayEnv struct {
+	ts   *httptest.Server
+	peer *websocket.Conn
+	id   string
+}
+
+// newRelayEnv starts the server and connects a tunnel peer through the
+// real /ws/tunnel upgrade and hello handshake.
+func newRelayEnv(t *testing.T) *relayEnv {
+	t.Helper()
+	srv := New(NewRegistry(t.TempDir()), ":0", []string{"*"}, false)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	hdr := http.Header{"Origin": []string{"native-client://test"}}
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws/tunnel", hdr)
+	if err != nil {
+		t.Fatalf("dial /ws/tunnel: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	writeFrame(t, conn, &proto.Frame{Type: "hello", Version: proto.HelloVersion, ClientType: "test"})
+	ack := readFrame(t, conn)
+	if !ack.Ok {
+		t.Fatalf("hello rejected: %s", ack.Error)
+	}
+	return &relayEnv{ts: ts, peer: conn, id: ack.TunnelID}
+}
+
+// awaitRequestStart reads the request_start for the next relayed request.
+func (e *relayEnv) awaitRequestStart(t *testing.T) proto.Frame {
+	t.Helper()
+	f := readFrame(t, e.peer)
+	if f.Type != "request_start" {
+		t.Fatalf("first frame = %q, want request_start", f.Type)
+	}
+	return f
+}
+
+// awaitCancel reads frames until a cancel for reqID arrives (spec §3.2
+// step 4 requires the client to be told to stop working on the relay).
+func (e *relayEnv) awaitCancel(t *testing.T, reqID uint32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		f := readFrame(t, e.peer)
+		if f.Type == "cancel" && f.ReqID == reqID {
+			return
+		}
+	}
+	t.Fatalf("no cancel frame for reqId %d", reqID)
+}
+
+func writeFrame(t *testing.T, c *websocket.Conn, f *proto.Frame) {
+	t.Helper()
+	if err := c.WriteJSON(f); err != nil {
+		t.Fatalf("write frame %s: %v", f.Type, err)
+	}
+}
+
+func readFrame(t *testing.T, c *websocket.Conn) proto.Frame {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, data, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	var f proto.Frame
+	if err := proto.Unmarshal(data, &f); err != nil {
+		t.Fatalf("unmarshal frame: %v", err)
+	}
+	return f
+}
+
+// TestRelayResponseStartTimeout verifies spec §3.2 step 4 (stage one): no
+// response_start within relayTimeout → the caller gets 504 and the tunnel
+// client receives a cancel frame for that request.
+//
+//	Given  a tunnel peer that acknowledges the request but never answers;
+//	When   the first-frame timeout expires;
+//	Then   the caller gets 504 and the peer receives cancel with the reqId.
+func TestRelayResponseStartTimeout(t *testing.T) {
+	withRelayTimeouts(t, 200*time.Millisecond, 300*time.Second)
+	env := newRelayEnv(t)
+
+	resCh := make(chan *http.Response, 1)
+	go func() {
+		resp, err := testHTTPClient.Get(env.ts.URL + "/t/" + env.id + "/slow")
+		if err != nil {
+			t.Errorf("GET /slow: %v", err)
+			resCh <- nil
+			return
+		}
+		resCh <- resp
+	}()
+
+	start := env.awaitRequestStart(t)
+	resp := <-resCh
+	if resp == nil {
+		t.Fatal("no response")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504", resp.StatusCode)
+	}
+	env.awaitCancel(t, start.ReqID)
+}
+
+// TestRelayStreamIdleTimeout verifies spec §3.2 step 4 (stage two): the
+// streaming phase has no total-duration cap, but streamIdleTimeout of
+// silence is cut — the caller's connection is truncated and the client
+// receives cancel.
+//
+//	Given  a peer that sends one chunk and then goes silent;
+//	When   the idle timeout expires;
+//	Then   the caller received the chunk, the body then fails mid-read, and
+//	       the peer receives cancel.
+func TestRelayStreamIdleTimeout(t *testing.T) {
+	withRelayTimeouts(t, 5*time.Second, 200*time.Millisecond)
+	env := newRelayEnv(t)
+
+	resCh := make(chan *http.Response, 1)
+	go func() {
+		resp, err := testHTTPClient.Get(env.ts.URL + "/t/" + env.id + "/stream")
+		if err != nil {
+			t.Errorf("GET /stream: %v", err)
+			resCh <- nil
+			return
+		}
+		resCh <- resp
+	}()
+
+	start := env.awaitRequestStart(t)
+	writeFrame(t, env.peer, &proto.Frame{Type: "response_start", ReqID: start.ReqID, Status: 200,
+		Headers: map[string][]string{"Content-Type": {"text/plain"}}})
+	writeFrame(t, env.peer, &proto.Frame{Type: "response_chunk", ReqID: start.ReqID, Seq: 0,
+		Data: base64.StdEncoding.EncodeToString([]byte("hello-"))})
+
+	resp := <-resCh
+	if resp == nil {
+		t.Fatal("no response")
+	}
+	defer resp.Body.Close()
+
+	// The first chunk must have reached the caller before the cut.
+	var got []byte
+	buf := make([]byte, 64)
+	for len(got) < len("hello-") {
+		n, err := resp.Body.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			t.Fatalf("stream ended before the first chunk: %v", err)
+		}
+	}
+	if string(got) != "hello-" {
+		t.Fatalf("body = %q, want %q", got, "hello-")
+	}
+
+	// After the idle timeout the truncated body must surface a read error
+	// (not a clean EOF — the caller must be able to tell the stream broke).
+	var readErr error
+	for readErr == nil {
+		_, readErr = resp.Body.Read(buf)
+	}
+	if readErr == io.EOF {
+		t.Fatalf("truncated stream must not end with a clean EOF, got %v", readErr)
+	}
+
+	env.awaitCancel(t, start.ReqID)
+}
+
+// TestRelayFirstFrameResponseEnd verifies spec §3.2 step 3: a response_end
+// arriving as the FIRST frame (target failed before response_start) yields
+// 502 to the caller, carrying the error, since no status was written yet.
+//
+//	Given  a peer that answers a request_end-style failure immediately;
+//	When   the relay handler receives it as the first frame;
+//	Then   the caller gets 502 with the target's error message.
+func TestRelayFirstFrameResponseEnd(t *testing.T) {
+	env := newRelayEnv(t)
+
+	resCh := make(chan *http.Response, 1)
+	go func() {
+		resp, err := testHTTPClient.Get(env.ts.URL + "/t/" + env.id + "/fail")
+		if err != nil {
+			t.Errorf("GET /fail: %v", err)
+			resCh <- nil
+			return
+		}
+		resCh <- resp
+	}()
+
+	start := env.awaitRequestStart(t)
+	writeFrame(t, env.peer, &proto.Frame{Type: "response_end", ReqID: start.ReqID, Error: "boom"})
+
+	resp := <-resCh
+	if resp == nil {
+		t.Fatal("no response")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "boom") {
+		t.Fatalf("body = %q, want it to carry the target error", body)
+	}
+}
+
+// TestRelaySessionDropMidStream verifies the pr.done teardown path: when
+// the tunnel session dies while a response is streaming, the handler ends
+// the caller's response cleanly instead of hanging.
+//
+//	Given  an open stream with one flushed chunk;
+//	When   the tunnel peer disconnects abruptly;
+//	Then   the caller has already received the chunk and the body then ends
+//	       cleanly (no error, no further data).
+func TestRelaySessionDropMidStream(t *testing.T) {
+	env := newRelayEnv(t)
+
+	resCh := make(chan *http.Response, 1)
+	go func() {
+		resp, err := testHTTPClient.Get(env.ts.URL + "/t/" + env.id + "/stream")
+		if err != nil {
+			t.Errorf("GET /stream: %v", err)
+			resCh <- nil
+			return
+		}
+		resCh <- resp
+	}()
+
+	start := env.awaitRequestStart(t)
+	writeFrame(t, env.peer, &proto.Frame{Type: "response_start", ReqID: start.ReqID, Status: 200,
+		Headers: map[string][]string{"Content-Type": {"text/plain"}}})
+	writeFrame(t, env.peer, &proto.Frame{Type: "response_chunk", ReqID: start.ReqID, Seq: 0,
+		Data: base64.StdEncoding.EncodeToString([]byte("hello"))})
+
+	resp := <-resCh
+	if resp == nil {
+		t.Fatal("no response")
+	}
+	defer resp.Body.Close()
+
+	// Read the flushed chunk first: once it has been read, the relay
+	// handler must have consumed it, so dropping the peer cannot race the
+	// handler's select between pr.ch and pr.done.
+	first := make([]byte, 5)
+	if _, err := io.ReadFull(resp.Body, first); err != nil {
+		t.Fatalf("read first chunk: %v", err)
+	}
+	if string(first) != "hello" {
+		t.Fatalf("first chunk = %q, want %q", first, "hello")
+	}
+
+	env.peer.Close()
+
+	rest, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("body after tunnel drop: %v", err)
+	}
+	if len(rest) != 0 {
+		t.Fatalf("body after tunnel drop = %q, want empty", rest)
+	}
+}
+
+// TestRelaySlowUploadExemptFromFirstFrameTimeout verifies that relayTimeout
+// constrains only the wait for the first RESPONSE frame (spec §3.2 step 4):
+// a request body dribbled in slower than relayTimeout must still relay.
+//
+//	Given  a first-frame budget of 200ms and an upload dribbled over 400ms;
+//	When   the request finally completes and the peer answers promptly;
+//	Then   the caller gets the peer's 200 — the upload phase was not cut.
+func TestRelaySlowUploadExemptFromFirstFrameTimeout(t *testing.T) {
+	withRelayTimeouts(t, 200*time.Millisecond, 300*time.Second)
+	env := newRelayEnv(t)
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("slow-"))
+		time.Sleep(400 * time.Millisecond) // 2× relayTimeout of silence
+		_, _ = pw.Write([]byte("payload"))
+		_ = pw.Close()
+	}()
+
+	resCh := make(chan *http.Response, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, env.ts.URL+"/t/"+env.id+"/upload", pr)
+		if err != nil {
+			t.Errorf("build request: %v", err)
+			resCh <- nil
+			return
+		}
+		resp, err := testHTTPClient.Do(req)
+		if err != nil {
+			t.Errorf("POST /upload: %v", err)
+			resCh <- nil
+			return
+		}
+		resCh <- resp
+	}()
+
+	start := env.awaitRequestStart(t)
+	if !start.HasBody {
+		t.Fatal("request_start must carry hasBody for a POST with a body")
+	}
+
+	var body []byte
+	for {
+		f := readFrame(t, env.peer)
+		switch f.Type {
+		case "request_chunk":
+			chunk, err := base64.StdEncoding.DecodeString(f.Data)
+			if err != nil {
+				t.Fatalf("decode chunk: %v", err)
+			}
+			body = append(body, chunk...)
+		case "request_end":
+			if string(body) != "slow-payload" {
+				t.Fatalf("uploaded body = %q, want %q", body, "slow-payload")
+			}
+			writeFrame(t, env.peer, &proto.Frame{Type: "response_start", ReqID: start.ReqID, Status: 200})
+			writeFrame(t, env.peer, &proto.Frame{Type: "response_end", ReqID: start.ReqID})
+			resp := <-resCh
+			if resp == nil {
+				t.Fatal("no response")
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			return
+		default:
+			t.Fatalf("unexpected frame %q while reading the upload", f.Type)
+		}
+	}
+}
 
 // TestSplitTunnelPath verifies the /t/{id}/rest URL parsing that feeds the
 // relay handler (spec §3.2): the tunnel ID and the target path are split

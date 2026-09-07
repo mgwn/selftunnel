@@ -1,8 +1,19 @@
 package client
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/mgwn/selftunnel/internal/proto"
 )
 
 // TestNormalizeServer verifies the server address normalization contract
@@ -112,5 +123,111 @@ func TestLoadConfigMissingFile(t *testing.T) {
 	}
 	if cfg == nil || cfg.Server != "" {
 		t.Fatalf("missing config must yield an empty config, got %+v", cfg)
+	}
+}
+
+// --- reconnect lifecycle test ----------------------------------------------
+
+// wsStub is a minimal relay-server stub for client lifecycle tests: it
+// accepts tunnel upgrades, answers hello, and tracks the connections so
+// the test can kill them server-side to force reconnects.
+type wsStub struct {
+	mu    sync.Mutex
+	conns []*websocket.Conn
+}
+
+func (s *wsStub) closeAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.conns {
+		_ = c.Close()
+	}
+}
+
+// newWSServer starts the stub and returns it together with its ws:// URL.
+func newWSServer(t *testing.T, stub *wsStub) string {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		stub.mu.Lock()
+		stub.conns = append(stub.conns, conn)
+		stub.mu.Unlock()
+		if _, _, err := conn.ReadMessage(); err != nil { // hello
+			return
+		}
+		if err := conn.WriteJSON(&proto.Frame{Type: "hello_ack", Ok: true, TunnelID: "abc123de"}); err != nil {
+			return
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(ts.Close)
+	return "ws" + strings.TrimPrefix(ts.URL, "http")
+}
+
+// TestCloseFiresPerConnectionGeneration is the regression test for the
+// client-side once-flag leak: connect() must re-arm close() for every new
+// connection. Before the fix, closed stayed true after the first
+// disconnect and every later close() was a silent no-op (no "closing
+// connection" log, no sleep-inhibitor release, no WS close frame).
+//
+//	Given  a client whose relay connection is killed server-side twice;
+//	When   each connection loss runs the reconnect loop;
+//	Then   close() fires for BOTH generations — two "closing connection"
+//	       log lines — and the client comes back online after each loss.
+func TestCloseFiresPerConnectionGeneration(t *testing.T) {
+	stub := &wsStub{}
+	serverURL := newWSServer(t, stub)
+
+	online := make(chan struct{}, 8)
+	var closeCount atomic.Int32
+	c := New(&Config{Server: serverURL}, Options{
+		OnStatusChange: func(s Status) {
+			if s == StatusOnline {
+				online <- struct{}{}
+			}
+		},
+		OnLog: func(level, msg string, attrs ...any) {
+			if msg == "closing connection" {
+				closeCount.Add(1)
+			}
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = c.Run(ctx)
+	}()
+	defer c.Stop()
+
+	waitOnline := func() {
+		t.Helper()
+		select {
+		case <-online:
+		case <-time.After(15 * time.Second):
+			t.Fatal("client did not come online in time")
+		}
+	}
+
+	waitOnline() // generation 1
+
+	stub.closeAll()
+	waitOnline() // generation 2: only reachable if generation 1 was torn down
+
+	stub.closeAll()
+	deadline := time.Now().Add(5 * time.Second)
+	for closeCount.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := closeCount.Load(); n < 2 {
+		t.Fatalf("close() fired %d times across two reconnects, want 2 — the once-flag was not re-armed", n)
 	}
 }

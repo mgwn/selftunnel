@@ -15,9 +15,19 @@ import (
 
 // relayTimeout bounds the wait for the first response frame (spec §3.2
 // step 4): if response_start does not arrive within this window, the caller
-// gets 504 and the client receives cancel. The streaming phase afterwards
-// has no total cap — only the session idle deadline applies.
-const relayTimeout = 120 * time.Second
+// gets 504 and the client receives cancel. It applies to the first frame
+// ONLY — the streaming phase afterwards uses streamIdleTimeout and has no
+// total-duration cap.
+//
+// Both values are package vars (not consts) so white-box tests can lower
+// them; production code must treat them as immutable.
+var relayTimeout = 120 * time.Second
+
+// streamIdleTimeout caps a stalled streaming response (spec §3.2 step 4):
+// it is reset by every received response frame, so an actively producing
+// stream (SSE/LLM replies) never times out; only silence this long is cut —
+// the client receives cancel and the caller's connection is truncated.
+var streamIdleTimeout = 300 * time.Second
 
 // chunkSize is the raw body size per request_chunk/response_chunk frame,
 // before base64 encoding (spec §3.2 step 2).
@@ -43,8 +53,9 @@ var hopByHopHeaders = map[string]bool{
 //
 // Error mapping: unknown/malformed tunnelID → 404; tunnel offline or the
 // session dies mid-relay → 502; no response_start within relayTimeout →
-// 504. Failure is always fast — the handler never queues and waits for a
-// client to come back.
+// 504; a stream silent for streamIdleTimeout → cancel + truncated
+// connection. Failure is always fast — the handler never queues and waits
+// for a client to come back.
 func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 	id, path := splitTunnelPath(r.URL.Path)
 	if !validTunnelID(id) {
@@ -64,9 +75,6 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), relayTimeout)
-	defer cancel()
-
 	reqID := sess.NextReqID()
 	pr := sess.RegisterPending(reqID)
 	defer sess.UnregisterPending(reqID)
@@ -85,7 +93,10 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 		Headers: filterHeaders(r.Header),
 		HasBody: hasBody,
 	}
-	if err := sess.sendWithContext(ctx, start); err != nil {
+	// The upload phase carries no relayTimeout: only the wait for the
+	// first response frame is capped (spec §3.2 step 4); a slow caller may
+	// take as long as it likes to stream its request body up.
+	if err := sess.sendWithContext(r.Context(), start); err != nil {
 		maybeSendCancel(sess, reqID)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "tunnel unreachable"})
 		return
@@ -93,7 +104,7 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 	tun.reqCount.Add(1)
 
 	if hasBody {
-		if err := streamBody(ctx, sess, reqID, r.Body); err != nil {
+		if err := streamBody(r.Context(), sess, reqID, r.Body); err != nil {
 			maybeSendCancel(sess, reqID)
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "failed to stream request body"})
 			return
@@ -102,10 +113,23 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	flusher, _ := w.(http.Flusher)
 
+	// Stage one (spec §3.2 step 4): wait for the first response frame,
+	// capped by relayTimeout. pr.done fires when the session tears down
+	// (its mailbox closes, so pr.ch never delivers again).
+	waitCtx, cancel := context.WithTimeout(r.Context(), relayTimeout)
+	defer cancel()
+
 	select {
 	case f := <-pr.ch:
-		if f == nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "tunnel offline"})
+		if f.Type == "response_end" {
+			// The target failed before any response_start (spec §3.2
+			// step 3): the status has not been written, so the error
+			// can still surface as a 502.
+			msg := f.Error
+			if msg == "" {
+				msg = "request failed"
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": msg})
 			return
 		}
 		if f.Type != "response_start" {
@@ -117,18 +141,32 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 
-	case <-ctx.Done():
+	case <-pr.done:
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "tunnel offline"})
+		return
+
+	case <-waitCtx.Done():
 		maybeSendCancel(sess, reqID)
 		writeJSON(w, http.StatusGatewayTimeout, map[string]any{"error": "request timeout"})
 		return
 	}
 
+	// Stage two (spec §3.2 step 4): stream chunks until response_end with
+	// NO total-duration cap — only streamIdleTimeout of silence is cut,
+	// and every received frame resets the idle timer.
+	idle := time.NewTimer(streamIdleTimeout)
+	defer idle.Stop()
+
 	for {
 		select {
 		case f := <-pr.ch:
-			if f == nil {
-				return
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
 			}
+			idle.Reset(streamIdleTimeout)
 			switch f.Type {
 			case "response_chunk":
 				data, err := base64.StdEncoding.DecodeString(f.Data)
@@ -142,13 +180,24 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 				}
 			case "response_end":
 				if f.Error != "" {
-					slog.Debug("response end error", "reqId", reqID, "err", f.Error)
+					slog.Warn("response end error", "reqId", reqID, "err", f.Error)
 				}
 				return
 			default:
 				return
 			}
-		case <-ctx.Done():
+
+		case <-pr.done:
+			slog.Warn("tunnel dropped mid-stream", "tunnel", id, "reqId", reqID)
+			return
+
+		case <-idle.C:
+			maybeSendCancel(sess, reqID)
+			slog.Warn("stream idle timeout", "tunnel", id, "reqId", reqID, "idle", streamIdleTimeout)
+			truncateResponse(w)
+			return
+
+		case <-r.Context().Done():
 			maybeSendCancel(sess, reqID)
 			return
 		}
@@ -244,6 +293,24 @@ func streamBody(ctx context.Context, sess *Session, reqID uint32, body io.ReadCl
 // cancel semantics). Errors are ignored — the session may be gone.
 func maybeSendCancel(sess *Session, reqID uint32) {
 	_ = sess.send(&proto.Frame{Type: "cancel", ReqID: reqID})
+}
+
+// truncateResponse forcibly ends a chunked response that is being cut short
+// (spec §3.2 step 4, streaming idle timeout): merely returning from the
+// handler would send the terminating zero-length chunk and make the
+// truncated body look complete to the caller, so the raw connection is
+// hijacked and closed instead. When hijacking is unavailable (HTTP/2), it
+// falls back to a plain return.
+func truncateResponse(w http.ResponseWriter) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return
+	}
+	conn, _, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	_ = conn.Close()
 }
 
 // writeJSON writes a JSON error body with the given status; used for all
