@@ -109,9 +109,13 @@ func newEchoTarget(marker string) http.Handler {
 // --- harness ---------------------------------------------------------------
 
 // harness owns one relay server and its default echo target for a test.
+// reg and srv are exposed for the §3.8 GUI-server behaviours (session
+// management, stats polling) exercised headlessly.
 type harness struct {
 	relay  *httptest.Server
 	target *httptest.Server
+	reg    *server.Registry
+	srv    *server.Server
 }
 
 // newHarness starts a real relay server (fresh registry in a temp dir) and
@@ -127,7 +131,7 @@ func newHarness(t *testing.T, debugServer bool) *harness {
 	target := httptest.NewServer(newEchoTarget("target-A"))
 	t.Cleanup(relay.Close)
 	t.Cleanup(target.Close)
-	return &harness{relay: relay, target: target}
+	return &harness{relay: relay, target: target, reg: reg, srv: srv}
 }
 
 // testClient wraps a running client and captures the attributes of its
@@ -153,6 +157,13 @@ func (h *harness) startClient(t *testing.T, customID, targetURL, secret string) 
 		CustomID: customID,
 		Secret:   secret,
 	}
+	return connectClient(t, cfg)
+}
+
+// connectClient runs a real client against cfg's server and waits until
+// it is online; it is stopped automatically when the test ends.
+func connectClient(t *testing.T, cfg *client.Config) *testClient {
+	t.Helper()
 	tc := &testClient{cfg: cfg, attrs: map[string]any{}}
 	tc.Client = client.New(cfg, client.Options{
 		OnLog: func(level, msg string, attrs ...any) {
@@ -629,4 +640,134 @@ func (w *lockedLogWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.buf.Write(p)
+}
+
+// TestE2EAppLifecycle verifies spec §9.15: the App wrapper (which the GUI
+// server drives) starts the embedded server, relays exactly like the CLI
+// front end, rejects a double start, and stops gracefully.
+//
+//	Given  an App listening on an ephemeral port with an online client;
+//	When   a request is relayed and the App is then stopped;
+//	Then   relaying worked before Stop, and the listener is gone after.
+func TestE2EAppLifecycle(t *testing.T) {
+	reg := server.NewRegistry(t.TempDir())
+	if err := reg.Load(); err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	srv := server.New(reg, "", []string{"native-client://"}, false)
+	app := server.NewApp(srv, "127.0.0.1:0", "", "")
+	if err := app.Start(); err != nil {
+		t.Fatalf("App.Start: %v", err)
+	}
+	base := "http://" + app.Addr()
+
+	if err := app.Start(); err == nil {
+		t.Fatal("double Start must be an error")
+	}
+
+	target := httptest.NewServer(newEchoTarget("target-A"))
+	defer target.Close()
+	tc := connectClient(t, &client.Config{
+		Server:   client.NormalizeServer(base),
+		Target:   target.URL,
+		CustomID: "applife1",
+	})
+	if body := readBody(t, do(t, "GET", base+"/t/"+tc.TunnelID()+"/who", nil, nil)); body != "target-A" {
+		t.Fatalf("relay through App got %q", body)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.Stop(ctx); err != nil {
+		t.Fatalf("App.Stop: %v", err)
+	}
+	if err := app.Stop(ctx); err != nil {
+		t.Fatalf("Stop on a stopped App must be a no-op, got: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resp, err := httpClient.Get(base + "/healthz")
+		if err != nil {
+			break // listener is gone — expected
+		}
+		resp.Body.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("listener still serving after Stop")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestE2EKickSessionIsolation verifies spec §9.18: closing one session
+// (the GUI server's Disconnect action) fails only that tunnel while
+// others keep working.
+//
+//	Given  two online clients with distinct tunnelIDs;
+//	When   client A's session is closed via the registry;
+//	Then   A's tunnel answers 502 "tunnel offline" and B keeps relaying.
+func TestE2EKickSessionIsolation(t *testing.T) {
+	h := newHarness(t, false)
+	tcA := h.startClient(t, "kicka001", h.target.URL, "")
+	tcB := h.startClient(t, "kickb002", h.target.URL, "")
+
+	sess := h.reg.Get(tcA.TunnelID()).Session()
+	if sess == nil {
+		t.Fatal("client A has no online session")
+	}
+	sess.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := httpClient.Get(h.relay.URL + "/t/kicka001/who")
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusBadGateway && strings.Contains(string(body), "tunnel offline") {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("kicked tunnel did not go offline with 502")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	resp := do(t, "GET", h.relay.URL+"/t/"+tcB.TunnelID()+"/who", nil, nil)
+	if body := readBody(t, resp); body != "target-A" {
+		t.Fatalf("client B affected by the kick: %q", body)
+	}
+}
+
+// TestE2EPollStatsTargetRefresh verifies spec §3.8.4: PollStats refreshes
+// the target column for the session table — and, as a regression guard,
+// must not clobber the server-side request counter (spec §3.2 step 5)
+// with the client's own zero report.
+//
+//	Given  an online client that has relayed one request;
+//	When   the server polls stats and the client's stats frame arrives;
+//	Then   the tunnel's target shows the client's target URL and the
+//	       request count is unchanged.
+func TestE2EPollStatsTargetRefresh(t *testing.T) {
+	h := newHarness(t, false)
+	tc := h.startClient(t, "stats001", h.target.URL, "")
+
+	if body := readBody(t, do(t, "GET", h.tunnelURL(tc)+"/who", nil, nil)); body != "target-A" {
+		t.Fatalf("relay got %q", body)
+	}
+	tun := h.reg.Get(tc.TunnelID())
+	if got := tun.RequestCount(); got != 1 {
+		t.Fatalf("request count after one relay = %d, want 1", got)
+	}
+
+	h.srv.PollStats()
+	deadline := time.Now().Add(2 * time.Second)
+	for tun.Target() != h.target.URL {
+		if time.Now().After(deadline) {
+			t.Fatalf("target not refreshed by PollStats: %q", tun.Target())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := tun.RequestCount(); got != 1 {
+		t.Fatalf("stats frame must not reset the server-side counter: got %d, want 1", got)
+	}
 }

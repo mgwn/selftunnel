@@ -53,6 +53,10 @@ make smoke    # tests/pipeline/smoke.sh (needs curl + python3)
 | 12. 8 concurrent requests, no cross-talk | `TestE2ERelay/concurrency-16` | — |
 | 13. GUI log area, fresh ID after reset | — (GUI) | AI-01, AI-13 |
 | 14. vet/build/build.sh clean | CI (`go vet`, `go build`, image build) | AI-12 (full matrix) |
+| 15. GUI server lifecycle (= CLI behaviour) | `TestE2EAppLifecycle` (server.App wrapper) | AI-15 |
+| 16. ngrok one-click exposure | — (needs an authtoken + network) | AI-15 |
+| 17. client-config generation | — (GUI file dialog) | AI-15 |
+| 18. session table, disconnect isolation, log filters | `TestE2EKickSessionIsolation`, `TestE2EPollStatsTargetRefresh` (log pane GUI) | AI-15 |
 
 Debug feature (`-debug`) regressions are covered on both tracks:
 `TestLogRequestsLogsEveryRequest`, `TestE2EDebugServer`, and both phases of

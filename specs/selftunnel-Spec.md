@@ -1,13 +1,17 @@
-# selftunnel — Software Specification v0.1.0 · Native Client Edition (for AI coding)
+# selftunnel — Software Specification v0.2.0 · Native Client Edition (for AI coding)
 
 > This spec is self-contained: the complete project can be generated from it alone. All "MUST" items are acceptance criteria; "OPTIONAL" items may be deferred.
 > Intended audience: code-generating AI or full-stack engineers. Do not introduce third-party dependencies not listed in this spec.
+> v0.2.0 revision (GUI server for non-technical operators): adds `selftunnel-server-gui` — the full CLI-server feature set behind a desktop UI, with optional embedded ngrok exposure (managed as an external binary subprocess, not a Go dependency), one-click client-config generation, live client-session management and a filterable log view (§3.8). No wire-protocol changes.
 
 ## 0. Project Overview
 
 Implement a multi-tenant reverse tunnel system:
 
-- **Server** (`selftunnel-server`, single Go binary): no web UI; only two endpoints — the tunnel intake endpoint (`/ws/tunnel`, WSS) and the REST relay endpoint (`ANY /t/{tunnelID}/*`). Supports any number of native clients connected simultaneously, dispatching requests by tunnelID.
+- **Server** (single Go binary, served identically by two front ends):
+  - `selftunnel-server`: headless CLI server for public hosts / containers;
+  - `selftunnel-server-gui`: Fyne desktop application for non-technical operators, embedding the same server plus operator features (§3.8) — ngrok exposure, client-config generation, session management, log view;
+  - Both expose only two endpoints — the tunnel intake endpoint (`/ws/tunnel`, WSS) and the REST relay endpoint (`ANY /t/{tunnelID}/*`) — and support any number of native clients connected simultaneously, dispatching requests by tunnelID. Neither has a web UI (§8).
 - **Client** (native Go binary, **no administrator privileges required**):
   - `selftunnel-client`: command-line client for servers / containers / scripts;
   - `selftunnel-client-gui`: Fyne cross-platform desktop client with status, configuration and log panes;
@@ -28,6 +32,7 @@ Implement a multi-tenant reverse tunnel system:
 | HTTP routing | Go 1.22+ standard library `http.ServeMux` pattern routing | no third-party router |
 | Config persistence | single JSON file (`data/tunnels.json`), whole-file overwrite on write | no database |
 | Logging | standard library `log/slog` | |
+| GUI (optional) | `cmd/selftunnel-server-gui` | Fyne v2, operator features (§3.8) |
 | Everything else | Go standard library + gorilla/websocket only | |
 
 ### Client
@@ -46,8 +51,11 @@ Implement a multi-tenant reverse tunnel system:
 ### Dependency whitelist
 
 - `github.com/gorilla/websocket`
-- `fyne.io/fyne/v2` (GUI client only)
+- `fyne.io/fyne/v2` (GUI applications: client and server GUIs)
 - Go standard library
+
+ngrok is invoked as an **external binary subprocess** (§3.8.2) and is not
+a Go module dependency — the whitelist above is unchanged by it.
 
 ## 2. Project Layout
 
@@ -64,11 +72,14 @@ The Go module lives at the repository root (standard open-source layout); specif
 ├── scripts/hooks/                   # git hooks: commit-msg lint + pre-commit checks
 ├── cmd/
 │   ├── selftunnel-server/main.go         # server entry point
+│   ├── selftunnel-server-gui/main.go     # Fyne GUI server entry point (§3.8)
 │   ├── selftunnel-client/main.go         # CLI client entry point
 │   └── selftunnel-client-gui/main.go     # Fyne GUI client entry point
 ├── internal/
 │   ├── proto/
 │   │   └── frame.go                 # framing protocol definition (§5)
+│   ├── ngrok/
+│   │   └── ngrok.go                # ngrok subprocess manager (§3.8.2): download, run, public-URL polling
 │   ├── client/
 │   │   ├── client.go                # client core: connect, heartbeat, reconnect, request forwarding
 │   │   ├── power.go                 # sleep-prevention common interface
@@ -169,6 +180,58 @@ While the tunnel is online, prevent the system from idle-sleeping; on disconnect
 - Call `PreventSleep()` after a successful connection; call `AllowSleep()` when the connection closes or the process exits.
 - Failures are only logged as warnings and never affect the tunnel's main logic.
 - Only **idle-timeout sleep** can be prevented; manual sleep, lid-close (if the power plan sleeps on lid close) and battery depletion still take effect.
+
+### 3.8 Server: GUI server (`selftunnel-server-gui`)
+
+A Fyne desktop application (title "selftunnel server", initial size
+900×600) embedding the full relay server for non-technical operators:
+everything the CLI server does, behind a Start/Stop button, plus the
+operator features below. It is a native desktop application, not a web UI
+(§8). The HTTP surface it serves is byte-identical to §4.
+
+1. **Server lifecycle.** A settings form — listen address (default
+   `127.0.0.1:8080`; selectable per network interface or `0.0.0.0` for
+   direct LAN exposure), data directory (default `./data`), optional TLS
+   certificate/key paths, and a debug checkbox (the `-debug` equivalent).
+   Start runs the embedded `http.Server` on the chosen address; Stop
+   shuts it down gracefully — in-flight relayed requests get up to 10s to
+   complete, then the listener closes and all tunnel sessions are closed
+   as in §3.1 step 6. Start/Stop are idempotent and reflected in a status
+   bar showing the local entry-point URL.
+2. **Optional embedded ngrok exposure** (for operators without a public
+   server). Inputs: an ngrok authtoken (persisted in a local settings
+   file, never written to logs) and the binary source — auto-download
+   from the official per-platform stable URL, or a manually selected
+   path. One click starts ngrok as an HTTP tunnel to the local relay
+   port, polls the ngrok local agent API
+   (`http://127.0.0.1:4040/api/tunnels`) for the assigned public URL,
+   and displays the public entry point (`https://<ngrok-host>/t/{tunnelID}`,
+   copyable). ngrok runs as a subprocess; it is stopped when the server
+   stops. Failures — missing/invalid token, download failure, agent API
+   unreachable — surface as a dialog plus a log entry. ngrok terminates
+   TLS at its edge, so the local listener may stay plain HTTP on
+   loopback in this mode.
+3. **One-click client configuration.** Generates a client `config.json`
+   with `server` set to the current public address (`wss://` derived
+   from the ngrok or direct HTTPS address; `ws://` for plain local
+   exposure); all other fields are left empty for the operator to fill
+   in on the client machine. Saved through a file dialog; the public
+   entry-URL template is copyable from the status bar at any time.
+4. **Client session management.** A live table of all registered tunnels
+   — tunnelID, remote address, connected-since, target address
+   (refreshed via the existing `get_stats`/`stats` frames on connect and
+   at most every 10s), forwarded request count, online/offline. Per-row
+   action: **Disconnect** — closes that session (pending requests fail
+   with 502, the registration and secret are kept, §3.1). Registered but
+   offline tunnels remain listed.
+5. **Log view.** All server logs — including the per-request debug log
+   when enabled — in a read-only pane with a level filter
+   (info/warn/debug) and a text-contains filter; roughly the last 1000
+   lines are kept.
+
+Explicit non-goals of the GUI: editing tunnel registrations, resetting
+secrets, or any administration of the data directory beyond the settings
+above (the data directory stays operator-managed).
 
 ## 4. Complete URL Route Table (server, all routes)
 
@@ -276,7 +339,8 @@ Client distribution:
   - `selftunnel-server` (local platform)
   - `selftunnel-server-linux` (Linux amd64)
   - `dist/selftunnel-client-{windows,darwin,linux}-{amd64,arm64}[.exe]` (cgo-free static binaries)
-  - `dist/selftunnel-client-gui-{GOOS}-{GOARCH}[.exe]` (GUI for the build platform)
+  - `dist/selftunnel-client-gui-{GOOS}-{GOARCH}[.exe]` (GUI client for the build platform)
+  - `dist/selftunnel-server-gui-{GOOS}-{GOARCH}[.exe]` (GUI server for the build platform; same platform rules as the GUI client — see scripts/release/build.sh)
 - Windows users run the `.exe` directly; macOS/Linux users run the matching binary; no installation and no administrator privileges anywhere.
 
 ### 6.5 Persistence
@@ -324,3 +388,19 @@ Client `config.json`: `{server, target, customId, tunnelId, secret}`.
     client for windows/linux/darwin on amd64 and arm64; and `build.sh`
     one-shot producing the server binary, cross-platform CLI binaries and
     the local GUI binary.
+15. `selftunnel-server-gui` starts the embedded server from the settings
+    form; `GET /healthz` answers and tunnels connect and relay exactly as
+    against the CLI server; Stop shuts the listener down gracefully and
+    sessions close per §3.1.
+16. With a valid ngrok authtoken, one-click exposure yields a working
+    public https entry point: a client connecting through it relays
+    requests successfully; stopping the server stops the ngrok
+    subprocess; an invalid token surfaces a clear error dialog.
+17. The generated client config file loads in `selftunnel-client` (and
+    prefills the GUI client form) and connects without edits beyond the
+    target address.
+18. The session table lists online clients with live counters (requests
+    forwarded, connected-since, target); Disconnect drops the chosen
+    session — its in-flight requests fail 502 while other tunnels are
+    unaffected — and offline tunnels remain listed; the log pane filters
+    by level and by text.

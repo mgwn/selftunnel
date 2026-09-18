@@ -33,6 +33,9 @@ if [ "$(go env GOOS)" = "windows" ]; then
 fi
 go build -ldflags="${GUI_LDFLAGS}" -o "dist/selftunnel-client-gui-$(go env GOOS)-$(go env GOARCH)${GUI_SUFFIX}" ./cmd/selftunnel-client-gui
 
+echo "==> Building selftunnel-server-gui (native GUI)..."
+go build -ldflags="${GUI_LDFLAGS}" -o "dist/selftunnel-server-gui-$(go env GOOS)-$(go env GOARCH)${GUI_SUFFIX}" ./cmd/selftunnel-server-gui
+
 echo "==> Building selftunnel-client-gui (windows/amd64 GUI)..."
 if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
   CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -ldflags='-w -s -H=windowsgui' -o dist/selftunnel-client-gui-windows-amd64.exe ./cmd/selftunnel-client-gui
@@ -52,3 +55,4 @@ echo "    selftunnel-server"
 echo "    selftunnel-server-linux"
 echo "    dist/selftunnel-client-*"
 echo "    dist/selftunnel-client-gui-*"
+echo "    dist/selftunnel-server-gui-*"

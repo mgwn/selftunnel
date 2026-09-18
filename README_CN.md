@@ -42,6 +42,7 @@
 - **命令行客户端**：适合服务器、Docker、CI 等无头场景。
 - **防休眠**：Windows / macOS / Linux 在隧道在线期间自动阻止系统空闲睡眠。
 - **mTLS 支持**：客户端可向目标 HTTPS 服务提供客户端证书。
+- **运维 GUI 服务端**：`selftunnel-server-gui` 以桌面应用承载完整服务端——启停控制、可选的一键 ngrok 公网暴露、客户端配置生成、实时会话管理与可过滤日志。
 - **单二进制**：服务端 `selftunnel-server`、客户端 `selftunnel-client`、GUI `selftunnel-client-gui`，无需运行时依赖。
 
 ---
@@ -110,6 +111,12 @@
 - `GET /ws/tunnel` —— 隧道接入
 - `ANY /t/{tunnelID}/*` —— 中转接口
 - `GET /healthz` —— 健康检查
+
+没有自己的公网服务器？改用 **GUI 服务端**——它在桌面应用里内嵌同一服务端，一键经 ngrok 隧道暴露到公网（粘贴 authtoken 点“暴露”即可），还能生成开箱即用的客户端配置、实时查看会话与日志：
+
+```bash
+./selftunnel-server-gui
+```
 
 生产环境应加反向代理以 HTTPS/WSS 暴露（见下文）。
 

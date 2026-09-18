@@ -1,13 +1,17 @@
-# selftunnel —— 软件规格说明书 v0.1.0·原生客户端版（供 AI 编码使用）
+# selftunnel —— 软件规格说明书 v0.2.0·原生客户端版（供 AI 编码使用）
 
 > 本 Spec 自包含：读完即可生成完整工程。所有"必须（MUST）"为验收项，"可选（OPTIONAL）"可后置。
 > 目标读者：代码生成 AI 或全栈工程师。禁止引入本 Spec 未列出的第三方依赖。
+> v0.2.0 修订（面向非技术运维的 GUI 服务端）：新增 `selftunnel-server-gui`——以桌面 UI 承载 CLI 服务端的全部功能，附可选的内嵌 ngrok 公网暴露（作为外部二进制子进程管理，不引入 Go 依赖）、一键生成客户端配置、在线客户端会话管理与可过滤的日志视图（§3.8）。协议无变化。
 
 ## 0. 项目概述
 
 实现一个多租户反向隧道系统：
 
-- **服务器**（`selftunnel-server`，Go 单二进制）：无 Web UI，只提供两个端点——隧道接入端点（`/ws/tunnel`，WSS）与 REST 中转接口（`ANY /t/{tunnelID}/*`）。支持任意多个原生客户端同时接入，按 tunnelID 分发请求。
+- **服务器**（Go 单二进制，由两个前端形态承载，服务能力完全一致）：
+  - `selftunnel-server`：无头 CLI 服务端，适合公网主机/容器；
+  - `selftunnel-server-gui`：面向非技术运维的 Fyne 桌面应用，内嵌同一服务端并附运维特性（§3.8）——ngrok 暴露、客户端配置生成、会话管理、日志视图；
+  - 两者均只提供两个端点——隧道接入端点（`/ws/tunnel`，WSS）与 REST 中转接口（`ANY /t/{tunnelID}/*`）——支持任意多个原生客户端同时接入，按 tunnelID 分发请求；两者均无 Web UI（§8）。
 - **客户端**（原生 Go 二进制，**无需管理员权限**）：
   - `selftunnel-client`：命令行客户端，适合服务器/容器/脚本场景；
   - `selftunnel-client-gui`：Fyne 跨平台桌面客户端，带状态、配置、日志窗口；
@@ -28,6 +32,7 @@
 | HTTP 路由 | Go 1.22+ 标准库 `http.ServeMux` 模式路由 | 不引第三方 router |
 | 配置持久化 | 单个 JSON 文件（`data/tunnels.json`），写时整文件覆盖 | 不引入数据库 |
 | 日志 | 标准库 `log/slog` | |
+| GUI（可选） | `cmd/selftunnel-server-gui` | Fyne v2，运维特性见 §3.8 |
 | 其他 | 仅 Go 标准库 + gorilla/websocket | |
 
 ### 客户端
@@ -46,8 +51,10 @@
 ### 依赖白名单
 
 - `github.com/gorilla/websocket`
-- `fyne.io/fyne/v2`（仅 GUI 客户端）
+- `fyne.io/fyne/v2`（GUI 应用：客户端与服务端 GUI）
 - Go 标准库
+
+ngrok 以**外部二进制子进程**方式调用（§3.8.2），不是 Go 模块依赖——上方白名单不因它而改变。
 
 ## 2. 工程结构
 
@@ -64,11 +71,14 @@ Go 模块位于仓库根目录（标准开源布局）；规格说明文档（�
 ├── scripts/hooks/                   # git 钩子：commit-msg 校验 + pre-commit 检查
 ├── cmd/
 │   ├── selftunnel-server/main.go         # 服务端入口
+│   ├── selftunnel-server-gui/main.go     # Fyne GUI 服务端入口（§3.8）
 │   ├── selftunnel-client/main.go         # 命令行客户端入口
 │   └── selftunnel-client-gui/main.go     # Fyne GUI 客户端入口
 ├── internal/
 │   ├── proto/
 │   │   └── frame.go                 # 分帧协议定义（§5）
+│   ├── ngrok/
+│   │   └── ngrok.go                # ngrok 子进程管理（§3.8.2）：下载、运行、公网地址轮询
 │   ├── client/
 │   │   ├── client.go                # 客户端核心：连接、心跳、重连、请求转发
 │   │   ├── power.go                 # 防休眠通用接口
@@ -169,6 +179,44 @@ Fyne 跨平台桌面窗口，标题"selftunnel client"，初始尺寸 720×540�
 - 连接成功后调用 `PreventSleep()`；连接关闭/退出时调用 `AllowSleep()`。
 - 失败只记 warn，不影响隧道主逻辑。
 - 只能阻止**空闲超时导致的睡眠**；用户手动睡眠、合盖（若电源计划设为合盖休眠）、电量耗尽关机仍会触发。
+
+### 3.8 服务端：GUI 服务端（`selftunnel-server-gui`）
+
+面向非技术运维的 Fyne 桌面应用（标题 "selftunnel server"，初始尺寸
+900×600），内嵌完整的中转服务端：CLI 服务端的全部能力都在一个
+Start/Stop 按钮之后，并附以下运维特性。它是原生桌面应用而非 Web UI
+（§8）；对外 HTTP 服务面与 §4 完全一致。
+
+1. **服务生命周期。** 设置表单——监听地址（默认 `127.0.0.1:8080`，可
+   按网卡选择或 `0.0.0.0` 以便局域网直连暴露）、数据目录（默认
+   `./data`）、可选 TLS 证书/私钥路径、调试模式复选框（等价
+   `-debug`）。Start 在所选地址上启动内嵌 `http.Server`；Stop 优雅关
+   停——进行中的中转请求最多 10s 完成，随后关闭监听并按 §3.1 第 6 步
+   关闭全部隧道会话。Start/Stop 幂等，状态栏实时显示本地入口 URL。
+2. **可选内嵌 ngrok 公网暴露**（面向没有公网服务器的运维者）。输入：
+   ngrok authtoken（保存在本地设置文件中，绝不写入日志）与二进制来
+   源——从官方按平台 stable 下载地址自动下载，或手动选择路径。一键
+   启动 ngrok 作为指向本地中转端口的 HTTP 隧道，轮询 ngrok 本地
+   agent API（`http://127.0.0.1:4040/api/tunnels`）获取分配的公网
+   URL，并展示公网入口（`https://<ngrok-host>/t/{tunnelID}`，可复
+   制）。ngrok 以子进程运行，服务端停止时一并停止。失败——token 缺
+   失/无效、下载失败、agent API 不可达——以对话框 + 日志条目呈现。
+   该模式下 TLS 在 ngrok 边缘终结，本地监听可保持回环明文 HTTP。
+3. **一键生成客户端配置。** 生成一份客户端 `config.json`：`server`
+   填入当前公网地址（ngrok 或直连 HTTPS 地址派生 `wss://`；本地明
+   文暴露则 `ws://`），其余字段留空由运维在客户端机器上补填。经文
+   件对话框保存；公网入口 URL 模板随时可从状态栏复制。
+4. **客户端会话管理。** 全部已注册隧道的实时列表——tunnelID、远程
+   地址、接入时间、目标地址（连接时及此后至多每 10s 经既有
+   `get_stats`/`stats` 帧刷新）、累计转发请求数、在线/离线。逐行操
+   作：**断开**——关闭该会话（pending 请求按 502 失败，注册项与
+   secret 保留，见 §3.1）。已注册但离线的隧道持续显示在列表中。
+5. **日志视图。** 全部服务端日志（含启用时的逐请求调试日志）显示在
+   只读面板中，支持级别过滤（info/warn/debug）与文本包含过滤；保留
+   最近约 1000 行。
+
+GUI 的明确非目标：编辑隧道注册项、重置 secret、以及对数据目录的任
+何超出上述设置的管理（数据目录始终由运维自行管理）。
 
 ## 4. URL 路由总表（服务端，全部路由）
 
@@ -276,7 +324,8 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
   - `selftunnel-server`（本机）
   - `selftunnel-server-linux`（Linux amd64）
   - `dist/selftunnel-client-{windows,darwin,linux}-{amd64,arm64}[.exe]`（无 cgo 静态二进制）
-  - `dist/selftunnel-client-gui-{GOOS}-{GOARCH}[.exe]`（本机 GUI）
+  - `dist/selftunnel-client-gui-{GOOS}-{GOARCH}[.exe]`（本机 GUI 客户端）
+  - `dist/selftunnel-server-gui-{GOOS}-{GOARCH}[.exe]`（本机 GUI 服务端；平台规则与 GUI 客户端一致，见 scripts/release/build.sh）
 - Windows 用户直接运行 `.exe`，macOS/Linux 用户运行对应二进制；均无需安装、无需管理员权限。
 
 ### 6.5 持久化
@@ -318,3 +367,7 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 12. 并发：同时发起 8 个中转请求全部正确返回，reqId 交错不串包。
 13. GUI 客户端请求日志区展示最近请求/状态/重连日志，清空配置后重新连接可生成新 tunnelID。
 14. 质量门槛全部干净通过：`go vet ./...`；golangci-lint 零问题（depguard 强制依赖白名单）；`go test -race` 跑全量测试且 `internal/` 语句覆盖率 ≥ 70%；服务端与 CLI 客户端在 windows/linux/darwin（amd64 与 arm64）上免 cgo 交叉编译通过；`build.sh` 一键产出服务端二进制、跨平台 CLI 二进制与本机 GUI 二进制。
+15. `selftunnel-server-gui` 从设置表单启动内嵌服务端；`GET /healthz` 正常应答，隧道接入与中转行为与 CLI 服务端完全一致；Stop 优雅关停监听并按 §3.1 关闭会话。
+16. 使用有效 ngrok authtoken 时，一键暴露得到可用的公网 https 入口：客户端经该入口中转请求成功；停止服务端时 ngrok 子进程一并停止；无效 token 有明确的错误对话框。
+17. 生成的客户端配置文件可被 `selftunnel-client` 加载（并预填 GUI 客户端表单），除目标地址外无需修改即可连接。
+18. 会话列表实时显示在线客户端的计数（累计转发、接入时间、目标地址）；断开使所选会话下线——其 pending 请求 502 失败而其他隧道不受影响——离线隧道保留在列表中；日志面板支持级别与文本过滤。

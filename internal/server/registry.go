@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,6 +70,13 @@ func (t *Tunnel) Target() string {
 // the tunnel is offline. Safe for concurrent use.
 func (t *Tunnel) Session() *Session {
 	return t.session.Load()
+}
+
+// RequestCount returns the number of relayed requests this tunnel has
+// completed — the server-side counter of spec §3.2 step 5, displayed by
+// the GUI server (§3.8.4).
+func (t *Tunnel) RequestCount() uint64 {
+	return t.reqCount.Load()
 }
 
 // setSecretHash records the ownership secret hash. Call only once, when the
@@ -264,6 +272,19 @@ func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.tunnels)
+}
+
+// List returns all registered tunnels sorted by ID, for display in the
+// GUI server's session table (spec §3.8.4). Safe for concurrent use.
+func (r *Registry) List() []*Tunnel {
+	r.mu.RLock()
+	out := make([]*Tunnel, 0, len(r.tunnels))
+	for _, t := range r.tunnels {
+		out = append(out, t)
+	}
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // generateID returns a fresh random 8-character [a-z0-9] tunnel ID.

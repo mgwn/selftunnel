@@ -132,6 +132,17 @@ func (s *Server) handleHello(sess *Session, f *proto.Frame) error {
 	return sess.send(ack)
 }
 
+// PollStats sends a get_stats frame to every online session (spec §3.8.4),
+// so the GUI server's session table refreshes target addresses. The
+// replies arrive as stats frames and update the registry.
+func (s *Server) PollStats() {
+	for _, t := range s.registry.List() {
+		if sess := t.Session(); sess != nil {
+			_ = sess.send(&proto.Frame{Type: "get_stats"})
+		}
+	}
+}
+
 // handleHealthz serves GET /healthz (spec §3.3): a minimal liveness report
 // with the number of registered tunnels and online sessions. It deliberately
 // leaks no tunnel IDs.

@@ -7,6 +7,7 @@
 #   selftunnel-server-<goos>-<goarch>[.exe]        (CGO-free)
 #   selftunnel-client-<goos>-<goarch>[.exe]        (CGO-free)
 #   selftunnel-client-gui-<goos>-<goarch>[.exe]    (cgo; skipped with --no-gui)
+#   selftunnel-server-gui-<goos>-<goarch>[.exe]    (cgo; skipped with --no-gui)
 #
 # GUI platform rules (spec §6.4 / README):
 #   - linux:   built natively — the runner's arch must match goarch
@@ -83,5 +84,11 @@ CGO_ENABLED=1 GOOS="$GOOS_TARGET" GOARCH="$GOARCH_TARGET" \
   go build -ldflags="$GUI_LDFLAGS" \
   -o "dist/selftunnel-client-gui-${GOOS_TARGET}-${GOARCH_TARGET}${SUFFIX}" \
   ./cmd/selftunnel-client-gui
+
+echo "==> selftunnel-server-gui ${GOOS_TARGET}/${GOARCH_TARGET}"
+CGO_ENABLED=1 GOOS="$GOOS_TARGET" GOARCH="$GOARCH_TARGET" \
+  go build -ldflags="$GUI_LDFLAGS" \
+  -o "dist/selftunnel-server-gui-${GOOS_TARGET}-${GOARCH_TARGET}${SUFFIX}" \
+  ./cmd/selftunnel-server-gui
 
 ls -l dist/

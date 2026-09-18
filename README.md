@@ -42,6 +42,7 @@ Supports **Windows / macOS / Linux**. The server and clients are all single bina
 - **Command-line client**: for headless servers, Docker, CI and similar scenarios.
 - **Sleep prevention**: on Windows / macOS / Linux the system is kept from idle-sleeping while the tunnel is online.
 - **mTLS support**: the client can present a client certificate to the target HTTPS service.
+- **Operator GUI server**: `selftunnel-server-gui` wraps the full server for non-technical operators — start/stop, optional one-click ngrok exposure, client-config generation, live session management and a filterable log view.
 - **Single binaries**: `selftunnel-server`, `selftunnel-client` and `selftunnel-client-gui` have no runtime dependencies.
 
 ---
@@ -110,6 +111,15 @@ The server exposes three endpoints:
 - `GET /ws/tunnel` — tunnel intake
 - `ANY /t/{tunnelID}/*` — relay endpoint
 - `GET /healthz` — health check
+
+No public server of your own? Run the **GUI server** instead — it embeds
+the same server behind a desktop app and can expose it through an ngrok
+tunnel in one click (paste your authtoken, click *Expose*), generate a
+ready-to-use client config, and show live sessions and logs:
+
+```bash
+./selftunnel-server-gui
+```
 
 In production the server should be exposed via HTTPS/WSS behind a reverse proxy (see below).
 

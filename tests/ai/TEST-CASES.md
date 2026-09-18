@@ -224,6 +224,35 @@ here unless a case explicitly says so.
   the static binary; compose brings the server up on :8080 with data
   mounted at `./data`; healthz and one relayed request succeed.
 
+## AI-15 — GUI server for non-technical operators
+
+- **Spec ref:** §3.8, §9.15–18 · **Priority:** P1 · **Type:** GUI
+- **Preconditions:** `selftunnel-server-gui` built; a valid ngrok
+  authtoken for the exposure part.
+
+**Steps**
+
+1. Launch the GUI. Set the listen address to `127.0.0.1:8080`, click
+   **Start**; verify `curl http://127.0.0.1:8080/healthz` answers and
+   the status bar shows the local URL.
+2. Connect a client (CLI or GUI) against the local server; verify the
+   session table lists it (ID, remote, since, target after ≤10s,
+   requests count) and relaying works.
+3. Tick debug, make requests, verify per-request lines appear in the log
+   pane; try the level and text filters.
+4. Click **Disconnect selected** on the client's row; verify its tunnel
+   answers 502 while another connected client (if any) is unaffected.
+5. Paste the ngrok authtoken, click **Expose via ngrok**; verify the
+   public URL appears, then connect a client through
+   `wss://<ngrok-host>` and relay one request. Click **Stop ngrok**.
+6. Click **Generate client config…**, save the file, copy it to a client
+   machine, fill the target and connect.
+7. Click **Stop**; verify sessions drop and the listener is gone, and
+   that the ngrok process (if still running) terminates too.
+
+**Expected:** all seven steps behave per spec §3.8; no step requires a
+terminal (the non-technical bar of §3.8).
+
 ---
 
 ## Results
@@ -244,3 +273,4 @@ here unless a case explicitly says so.
 | AI-12 | | | |
 | AI-13 | | | |
 | AI-14 | | | |
+| AI-15 | | | |

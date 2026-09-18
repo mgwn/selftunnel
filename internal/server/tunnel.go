@@ -50,6 +50,7 @@ type Session struct {
 	tun        *Tunnel
 	server     *Server
 	remoteAddr string
+	startedAt  time.Time
 	sendQ      chan []byte
 	done       chan struct{}
 	pending    map[uint32]*pendingResp
@@ -68,6 +69,7 @@ func newSession(conn *websocket.Conn, srv *Server, remoteAddr string) *Session {
 		conn:       conn,
 		server:     srv,
 		remoteAddr: remoteAddr,
+		startedAt:  time.Now(),
 		sendQ:      make(chan []byte, sendQueueCap),
 		done:       make(chan struct{}),
 		pending:    make(map[uint32]*pendingResp),
@@ -138,14 +140,15 @@ func (s *Session) readLoop() {
 			// server does not currently wait for ack
 
 		case "stats":
+			// The target address is client-authoritative; the forwarded
+			// count is not taken from the frame — the client reports its
+			// own view, while the server-side counter (spec §3.2 step 5)
+			// is the authoritative one displayed by the GUI (§3.8.4).
 			if f.Target != "" && s.tun != nil {
 				s.tun.SetTarget(f.Target)
 				if err := s.server.registry.Save(); err != nil {
 					slog.Warn("failed to save registry", "err", err)
 				}
-			}
-			if s.tun != nil {
-				s.tun.reqCount.Store(f.Forwarded)
 			}
 
 		case "response_start", "response_chunk", "response_end":
@@ -331,3 +334,13 @@ func (s *Session) tunID() string {
 	}
 	return s.tun.ID
 }
+
+// Close tears the session down (idempotent). Exported for the GUI
+// server's Disconnect action and graceful stop (spec §3.8.1, §3.8.4).
+func (s *Session) Close() { s.close() }
+
+// RemoteAddr returns the tunnel client's network address, for display.
+func (s *Session) RemoteAddr() string { return s.remoteAddr }
+
+// StartedAt returns when the session was established, for display.
+func (s *Session) StartedAt() time.Time { return s.startedAt }

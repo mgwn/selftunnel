@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `selftunnel-server-gui` (spec v0.2.0 §3.8): a Fyne desktop front end
+  for non-technical operators embedding the full relay server —
+  start/stop with graceful shutdown, optional one-click ngrok exposure
+  (external binary subprocess, no new Go dependencies), client-config
+  generation, live session management with disconnect, and a filterable
+  log view. The new `server.App` lifecycle wrapper powers it and is
+  covered by end-to-end tests.
+
+### Fixed
+
+- The server-side per-tunnel request counter is no longer reset by the
+  client's stats frame (the client reports its own view; the server-side
+  count of spec §3.2 step 5 is authoritative).
+
 ## [0.1.0] - 2026-09-04
 
 Initial release, published under the name **selftunnel** and implementing
