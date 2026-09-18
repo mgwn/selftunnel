@@ -716,6 +716,28 @@ func (c *Client) sleepBackoff(ctx context.Context) error {
 	}
 }
 
+// ResolveStatePath decides where a GUI's state file (config.json, operator
+// settings) lives. Terminal launches keep the historical behavior — the
+// file sits in the current working directory. Finder launches of a .app
+// bundle start with "/" as the working directory, which is not writable,
+// so the file moves to the per-user config dir instead.
+func ResolveStatePath(name string) string {
+	if wd, err := os.Getwd(); err == nil {
+		if probe, err := os.CreateTemp(wd, ".selftunnel-writetest-*"); err == nil {
+			_ = probe.Close()
+			_ = os.Remove(probe.Name())
+			return filepath.Join(wd, name)
+		}
+	}
+	if dir, err := os.UserConfigDir(); err == nil {
+		dir = filepath.Join(dir, "selftunnel")
+		if err := os.MkdirAll(dir, 0700); err == nil {
+			return filepath.Join(dir, name)
+		}
+	}
+	return name
+}
+
 // LoadConfig loads the config file at path; a missing file yields an empty
 // config rather than an error (first run). Malformed JSON is an error.
 func LoadConfig(path string) (*Config, error) {

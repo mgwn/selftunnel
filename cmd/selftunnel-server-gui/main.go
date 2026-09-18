@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,28 +23,33 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mgwn/selftunnel/internal/client"
+	"github.com/mgwn/selftunnel/internal/guiicon"
 	"github.com/mgwn/selftunnel/internal/ngrok"
 	"github.com/mgwn/selftunnel/internal/server"
 )
 
-// settingsPath is the operator-settings file next to the binary; the
-// ngrok authtoken is stored here (never logged).
-const settingsPath = "selftunnel-server-gui.json"
+// settingsPath is the operator-settings file; the ngrok authtoken is
+// stored here (never logged). It sits in the working directory for
+// terminal launches and falls back to the per-user config dir when
+// launched as a .app from Finder (where the working directory is "/").
+var settingsPath = client.ResolveStatePath("selftunnel-server-gui.json")
 
 // settings holds every persisted operator preference (spec §3.8.2).
 type settings struct {
-	ListenAddr  string `json:"listenAddr"`
-	DataDir     string `json:"dataDir"`
-	CertFile    string `json:"certFile"`
-	KeyFile     string `json:"keyFile"`
-	NgrokToken  string `json:"ngrokToken"`
-	NgrokBinary string `json:"ngrokBinary"`
+	ListenAddr string `json:"listenAddr"`
+	DataDir    string `json:"dataDir"`
+	CertFile   string `json:"certFile"`
+	KeyFile    string `json:"keyFile"`
+	NgrokToken string `json:"ngrokToken"`
+	// NgrokBinary is a legacy settings key (external-binary era, pre SDK);
+	// retained so old settings files still load, but ignored.
+	NgrokBinary string `json:"ngrokBinary,omitempty"`
 }
 
 func defaultSettings() settings {
 	return settings{
 		ListenAddr: "127.0.0.1:8080",
-		DataDir:    "./data",
+		DataDir:    client.ResolveStatePath("data"),
 	}
 }
 
@@ -59,7 +63,7 @@ func loadSettings() settings {
 		s.ListenAddr = "127.0.0.1:8080"
 	}
 	if s.DataDir == "" {
-		s.DataDir = "./data"
+		s.DataDir = client.ResolveStatePath("data")
 	}
 	return s
 }
@@ -230,6 +234,7 @@ func (g *guiState) entryTemplate(listenAddr string, useTLS bool) string {
 func main() {
 	a := app.New()
 	win := a.NewWindow("selftunnel server")
+	win.SetIcon(guiicon.Resource)
 	win.Resize(fyne.NewSize(900, 600))
 
 	set := loadSettings()
@@ -263,15 +268,12 @@ func main() {
 
 	debugCheck := widget.NewCheck("Debug mode (log every request)", nil)
 
-	// ngrok inputs are declared early: the lifecycle handlers persist them
-	// with the settings (spec §3.8.2).
+	// The ngrok authtoken is declared early: the lifecycle handlers persist
+	// it with the settings (spec §3.8.2). The tunnel itself runs in-process
+	// via the ngrok Go SDK — no binary path to configure.
 	tokenEntry := widget.NewPasswordEntry()
 	tokenEntry.SetText(set.NgrokToken)
 	tokenEntry.SetPlaceHolder("ngrok authtoken (from https://dashboard.ngrok.com)")
-
-	binaryEntry := widget.NewEntry()
-	binaryEntry.SetText(set.NgrokBinary)
-	binaryEntry.SetPlaceHolder("ngrok binary path (empty = auto-download)")
 
 	// --- lifecycle ---
 
@@ -301,7 +303,7 @@ func main() {
 		set = settings{
 			ListenAddr: addr, DataDir: dataDir,
 			CertFile: strings.TrimSpace(certEntry.Text), KeyFile: strings.TrimSpace(keyEntry.Text),
-			NgrokToken: strings.TrimSpace(tokenEntry.Text), NgrokBinary: strings.TrimSpace(binaryEntry.Text),
+			NgrokToken: strings.TrimSpace(tokenEntry.Text),
 		}
 		saveSettings(set)
 
@@ -387,27 +389,10 @@ func main() {
 		app_ := state.app
 		state.mu.Unlock()
 
-		binary := strings.TrimSpace(binaryEntry.Text)
 		exposeBtn.Disable()
 		publicLabel.SetText("starting ngrok…")
 		go func() {
-			var err error
-			if binary == "" {
-				cacheDir := filepath.Join(os.TempDir(), "selftunnel-ngrok")
-				if ucd, uerr := os.UserCacheDir(); uerr == nil {
-					cacheDir = filepath.Join(ucd, "selftunnel", "ngrok")
-				}
-				binary, err = ngrok.EnsureBinary(cacheDir)
-				if err != nil {
-					fyne.Do(func() {
-						dialog.ShowError(err, win)
-						exposeBtn.Enable()
-						publicLabel.SetText("")
-					})
-					return
-				}
-			}
-			url, err := state.ng.Start(context.Background(), binary, token, portOf(app_.Addr()))
+			url, err := state.ng.Start(context.Background(), token, portOf(app_.Addr()))
 			fyne.Do(func() {
 				exposeBtn.Enable()
 				if err != nil {
@@ -515,10 +500,10 @@ func main() {
 	})
 
 	// --- log view (spec §3.8.5) ---
+	// A TextGrid renders read-only monospace log lines in the normal
+	// theme foreground/background, avoiding the disabled-entry gray-on-gray.
 
-	logEntry := widget.NewMultiLineEntry()
-	logEntry.Disable()
-	logEntry.Wrapping = fyne.TextWrapOff
+	logGrid := widget.NewTextGrid()
 
 	levelSelect := widget.NewSelect([]string{"All", "INFO", "WARN", "DEBUG"}, nil)
 	levelSelect.SetSelected("All")
@@ -531,7 +516,10 @@ func main() {
 		if len(lines) > display {
 			lines = lines[len(lines)-display:]
 		}
-		fyne.Do(func() { logEntry.SetText(strings.Join(lines, "\n")) })
+		fyne.Do(func() {
+			logGrid.SetText(strings.Join(lines, "\n"))
+			logGrid.ScrollToBottom()
+		})
 	}
 
 	// --- periodic refresh ---
@@ -571,7 +559,6 @@ func main() {
 		widget.NewFormItem("", debugCheck),
 		widget.NewFormItem("", container.NewHBox(startBtn, stopBtn, statusLabel)),
 		widget.NewFormItem("ngrok token", tokenEntry),
-		widget.NewFormItem("ngrok binary", binaryEntry),
 		widget.NewFormItem("", container.NewHBox(exposeBtn, stopExposeBtn, copyPublicBtn)),
 		widget.NewFormItem("Public URL", publicLabel),
 	)
@@ -583,7 +570,7 @@ func main() {
 	)
 	sessions := container.NewBorder(nil, container.NewHBox(disconnectBtn, generateBtn), nil, nil, table)
 	logFilter := container.NewHBox(widget.NewLabel("Logs:"), levelSelect, filterEntry)
-	logArea := container.NewBorder(logFilter, nil, nil, nil, logEntry)
+	logArea := container.NewBorder(logFilter, nil, nil, nil, logGrid)
 
 	win.SetContent(container.NewBorder(top, container.NewVBox(widget.NewSeparator(), logArea), nil, nil, sessions))
 	win.ShowAndRun()

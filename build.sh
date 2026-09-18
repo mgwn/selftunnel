@@ -36,6 +36,13 @@ go build -ldflags="${GUI_LDFLAGS}" -o "dist/selftunnel-client-gui-$(go env GOOS)
 echo "==> Building selftunnel-server-gui (native GUI)..."
 go build -ldflags="${GUI_LDFLAGS}" -o "dist/selftunnel-server-gui-$(go env GOOS)-$(go env GOARCH)${GUI_SUFFIX}" ./cmd/selftunnel-server-gui
 
+if [ "$(go env GOOS)" = "darwin" ]; then
+  echo "==> Packaging macOS .app bundles and DMG images..."
+  # Shared with the release pipeline so local and CI output stay identical.
+  scripts/release/package-darwin.sh "dist/selftunnel-client-gui-darwin-$(go env GOARCH)" "selftunnel-client" "com.mgwn.selftunnel.client"
+  scripts/release/package-darwin.sh "dist/selftunnel-server-gui-darwin-$(go env GOARCH)" "selftunnel-server" "com.mgwn.selftunnel.server"
+fi
+
 echo "==> Building selftunnel-client-gui (windows/amd64 GUI)..."
 if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
   CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -ldflags='-w -s -H=windowsgui' -o dist/selftunnel-client-gui-windows-amd64.exe ./cmd/selftunnel-client-gui
@@ -56,3 +63,6 @@ echo "    selftunnel-server-linux"
 echo "    dist/selftunnel-client-*"
 echo "    dist/selftunnel-client-gui-*"
 echo "    dist/selftunnel-server-gui-*"
+if [ "$(go env GOOS)" = "darwin" ]; then
+  echo "    dist/*.app + dist/*-darwin-*.dmg"
+fi

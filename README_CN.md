@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="selftunnel logo" width="160">
+</p>
+
 # selftunnel
 
 [![CI](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml)

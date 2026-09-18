@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/mgwn/selftunnel/internal/client"
+	"github.com/mgwn/selftunnel/internal/guiicon"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -20,9 +21,10 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// configPath is the config file next to the binary, persisted on every
-// connect (spec §6.5).
-const configPath = "config.json"
+// configPath is the config file, persisted on every connect (spec §6.5).
+// It sits in the working directory for terminal launches and falls back to
+// the per-user config dir when launched as a .app from Finder.
+var configPath = client.ResolveStatePath("config.json")
 
 // main builds the window and runs the Fyne event loop. Layout top-to-
 // bottom: settings form, status bar (state + tunnelID + copy button),
@@ -30,6 +32,7 @@ const configPath = "config.json"
 func main() {
 	a := app.New()
 	w := a.NewWindow("selftunnel client")
+	w.SetIcon(guiicon.Resource)
 	w.Resize(fyne.NewSize(720, 540))
 
 	cfg, err := client.LoadConfig(configPath)
@@ -79,30 +82,20 @@ func main() {
 	})
 	copyBtn.Disable()
 
-	// --- log pane: keeps roughly the last 500 lines responsive ---
+	// --- log pane: a TextGrid (monospace, read-only, theme-contrasting
+	// foreground) keeps roughly the last 500 lines responsive ---
 
-	logEntry := widget.NewMultiLineEntry()
-	logEntry.Disable()
-	logEntry.Wrapping = fyne.TextWrapWord
-	logEntry.SetText("")
-	logScroll := container.NewScroll(logEntry)
-	logScroll.SetMinSize(fyne.NewSize(0, 200))
+	logGrid := widget.NewTextGrid()
+	var logLines []string
 
 	appendLog := func(line string) {
 		fyne.Do(func() {
-			text := logEntry.Text
-			if text != "" {
-				text += "\n"
+			logLines = append(logLines, line)
+			if len(logLines) > 500 {
+				logLines = logLines[len(logLines)-500:]
 			}
-			text += line
-			// Keep the last ~500 lines so the widget stays responsive.
-			lines := strings.Split(text, "\n")
-			if len(lines) > 500 {
-				lines = lines[len(lines)-500:]
-				text = strings.Join(lines, "\n")
-			}
-			logEntry.SetText(text)
-			logScroll.ScrollToBottom()
+			logGrid.SetText(strings.Join(logLines, "\n"))
+			logGrid.ScrollToBottom()
 		})
 	}
 
@@ -226,7 +219,7 @@ func main() {
 		top,
 		container.NewVBox(widget.NewSeparator(), connectBtn),
 		nil, nil,
-		container.NewBorder(widget.NewLabel("Logs:"), nil, nil, nil, logScroll),
+		container.NewBorder(widget.NewLabel("Logs:"), nil, nil, nil, logGrid),
 	))
 
 	w.SetOnClosed(func() {

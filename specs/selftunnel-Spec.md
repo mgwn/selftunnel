@@ -2,7 +2,7 @@
 
 > This spec is self-contained: the complete project can be generated from it alone. All "MUST" items are acceptance criteria; "OPTIONAL" items may be deferred.
 > Intended audience: code-generating AI or full-stack engineers. Do not introduce third-party dependencies not listed in this spec.
-> v0.2.0 revision (GUI server for non-technical operators): adds `selftunnel-server-gui` — the full CLI-server feature set behind a desktop UI, with optional embedded ngrok exposure (managed as an external binary subprocess, not a Go dependency), one-click client-config generation, live client-session management and a filterable log view (§3.8). No wire-protocol changes.
+> v0.2.0 revision (GUI server for non-technical operators): adds `selftunnel-server-gui` — the full CLI-server feature set behind a desktop UI, with optional embedded ngrok exposure (in-process via the official ngrok Go SDK), one-click client-config generation, live client-session management and a filterable log view (§3.8). No wire-protocol changes.
 
 ## 0. Project Overview
 
@@ -52,10 +52,11 @@ Implement a multi-tenant reverse tunnel system:
 
 - `github.com/gorilla/websocket`
 - `fyne.io/fyne/v2` (GUI applications: client and server GUIs)
+- `golang.ngrok.com/ngrok/v2` (embedded ngrok exposure in the server GUI, §3.8.2)
 - Go standard library
 
-ngrok is invoked as an **external binary subprocess** (§3.8.2) and is not
-a Go module dependency — the whitelist above is unchanged by it.
+ngrok exposure runs **in-process via the official Go SDK** (§3.8.2) —
+there is no external binary to download or supervise.
 
 ## 2. Project Layout
 
@@ -79,7 +80,7 @@ The Go module lives at the repository root (standard open-source layout); specif
 │   ├── proto/
 │   │   └── frame.go                 # framing protocol definition (§5)
 │   ├── ngrok/
-│   │   └── ngrok.go                # ngrok subprocess manager (§3.8.2): download, run, public-URL polling
+│   │   └── ngrok.go                # embedded ngrok exposure (§3.8.2): in-process endpoint via the Go SDK
 │   ├── client/
 │   │   ├── client.go                # client core: connect, heartbeat, reconnect, request forwarding
 │   │   ├── power.go                 # sleep-prevention common interface
@@ -199,18 +200,16 @@ operator features below. It is a native desktop application, not a web UI
    as in §3.1 step 6. Start/Stop are idempotent and reflected in a status
    bar showing the local entry-point URL.
 2. **Optional embedded ngrok exposure** (for operators without a public
-   server). Inputs: an ngrok authtoken (persisted in a local settings
-   file, never written to logs) and the binary source — auto-download
-   from the official per-platform stable URL, or a manually selected
-   path. One click starts ngrok as an HTTP tunnel to the local relay
-   port, polls the ngrok local agent API
-   (`http://127.0.0.1:4040/api/tunnels`) for the assigned public URL,
-   and displays the public entry point (`https://<ngrok-host>/t/{tunnelID}`,
-   copyable). ngrok runs as a subprocess; it is stopped when the server
-   stops. Failures — missing/invalid token, download failure, agent API
-   unreachable — surface as a dialog plus a log entry. ngrok terminates
-   TLS at its edge, so the local listener may stay plain HTTP on
-   loopback in this mode.
+   server). Input: an ngrok authtoken (persisted in a local settings
+   file, never written to logs). One click opens an in-process ngrok
+   HTTPS endpoint (official Go SDK, `golang.ngrok.com/ngrok/v2`)
+   forwarding to the local relay port; the SDK returns the assigned
+   public URL directly, and the UI displays the public entry point
+   (`https://<ngrok-host>/t/{tunnelID}`, copyable). The endpoint is
+   closed when the server stops. Failures — missing/invalid token,
+   ngrok cloud unreachable — surface as a dialog plus a log entry.
+   ngrok terminates TLS at its edge, so the local listener may stay
+   plain HTTP on loopback in this mode.
 3. **One-click client configuration.** Generates a client `config.json`
    with `server` set to the current public address (`wss://` derived
    from the ngrok or direct HTTPS address; `ws://` for plain local
@@ -394,8 +393,8 @@ Client `config.json`: `{server, target, customId, tunnelId, secret}`.
     sessions close per §3.1.
 16. With a valid ngrok authtoken, one-click exposure yields a working
     public https entry point: a client connecting through it relays
-    requests successfully; stopping the server stops the ngrok
-    subprocess; an invalid token surfaces a clear error dialog.
+    requests successfully; stopping the server closes the ngrok
+    endpoint; an invalid token surfaces a clear error dialog.
 17. The generated client config file loads in `selftunnel-client` (and
     prefills the GUI client form) and connects without edits beyond the
     target address.

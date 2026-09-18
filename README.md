@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="selftunnel logo" width="160">
+</p>
+
 # selftunnel
 
 [![CI](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/mgwn/selftunnel/actions/workflows/ci.yml)
@@ -50,16 +54,16 @@ Supports **Windows / macOS / Linux**. The server and clients are all single bina
 ## Architecture
 
 ```
-┌─────────────────┐         WSS /ws/tunnel         ┌─────────────────┐
-│   selftunnel-client  │  ◄──────────────────────────►   │  selftunnel-server   │
-│ (your laptop /  │                                 │ (public server) │
-│  intranet host) │                                 └────────┬────────┘
-└─────────────────┘                                          │
-                                                             ▼ HTTP
-                                                    ┌─────────────────┐
-                                                    │   API callers   │
-                                                    │ /t/{tunnelID}/* │
-                                                    └─────────────────┘
+┌─────────────────────┐         WSS /ws/tunnel         ┌─────────────────────┐
+│  selftunnel-client  │  ◄──────────────────────────►  │  selftunnel-server  │
+│  (your laptop /     │                                │   (public server)   │
+│   intranet host)    │                                └──────────┬──────────┘
+└─────────────────────┘                                           │
+                                                                  ▼ HTTP
+                                                       ┌─────────────────────┐
+                                                       │     API callers     │
+                                                       │   /t/{tunnelID}/*   │
+                                                       └─────────────────────┘
 ```
 
 1. The client dials out to the server's `/ws/tunnel` endpoint and keeps a long-lived WebSocket connection.

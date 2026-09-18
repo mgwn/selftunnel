@@ -2,7 +2,7 @@
 
 > 本 Spec 自包含：读完即可生成完整工程。所有"必须（MUST）"为验收项，"可选（OPTIONAL）"可后置。
 > 目标读者：代码生成 AI 或全栈工程师。禁止引入本 Spec 未列出的第三方依赖。
-> v0.2.0 修订（面向非技术运维的 GUI 服务端）：新增 `selftunnel-server-gui`——以桌面 UI 承载 CLI 服务端的全部功能，附可选的内嵌 ngrok 公网暴露（作为外部二进制子进程管理，不引入 Go 依赖）、一键生成客户端配置、在线客户端会话管理与可过滤的日志视图（§3.8）。协议无变化。
+> v0.2.0 修订（面向非技术运维的 GUI 服务端）：新增 `selftunnel-server-gui`——以桌面 UI 承载 CLI 服务端的全部功能，附可选的内嵌 ngrok 公网暴露（经官方 ngrok Go SDK 进程内运行）、一键生成客户端配置、在线客户端会话管理与可过滤的日志视图（§3.8）。协议无变化。
 
 ## 0. 项目概述
 
@@ -52,9 +52,10 @@
 
 - `github.com/gorilla/websocket`
 - `fyne.io/fyne/v2`（GUI 应用：客户端与服务端 GUI）
+- `golang.ngrok.com/ngrok/v2`（服务端 GUI 的内嵌 ngrok 公网暴露，§3.8.2）
 - Go 标准库
 
-ngrok 以**外部二进制子进程**方式调用（§3.8.2），不是 Go 模块依赖——上方白名单不因它而改变。
+ngrok 公网暴露通过官方 Go SDK **在进程内运行**（§3.8.2）——无需下载或管理外部二进制。
 
 ## 2. 工程结构
 
@@ -78,7 +79,7 @@ Go 模块位于仓库根目录（标准开源布局）；规格说明文档（�
 │   ├── proto/
 │   │   └── frame.go                 # 分帧协议定义（§5）
 │   ├── ngrok/
-│   │   └── ngrok.go                # ngrok 子进程管理（§3.8.2）：下载、运行、公网地址轮询
+│   │   └── ngrok.go                # 内嵌 ngrok 暴露（§3.8.2）：经 Go SDK 进程内建立端点
 │   ├── client/
 │   │   ├── client.go                # 客户端核心：连接、心跳、重连、请求转发
 │   │   ├── power.go                 # 防休眠通用接口
@@ -194,14 +195,13 @@ Start/Stop 按钮之后，并附以下运维特性。它是原生桌面应用而
    停——进行中的中转请求最多 10s 完成，随后关闭监听并按 §3.1 第 6 步
    关闭全部隧道会话。Start/Stop 幂等，状态栏实时显示本地入口 URL。
 2. **可选内嵌 ngrok 公网暴露**（面向没有公网服务器的运维者）。输入：
-   ngrok authtoken（保存在本地设置文件中，绝不写入日志）与二进制来
-   源——从官方按平台 stable 下载地址自动下载，或手动选择路径。一键
-   启动 ngrok 作为指向本地中转端口的 HTTP 隧道，轮询 ngrok 本地
-   agent API（`http://127.0.0.1:4040/api/tunnels`）获取分配的公网
-   URL，并展示公网入口（`https://<ngrok-host>/t/{tunnelID}`，可复
-   制）。ngrok 以子进程运行，服务端停止时一并停止。失败——token 缺
-   失/无效、下载失败、agent API 不可达——以对话框 + 日志条目呈现。
-   该模式下 TLS 在 ngrok 边缘终结，本地监听可保持回环明文 HTTP。
+   ngrok authtoken（保存在本地设置文件中，绝不写入日志）。一键在进
+   程内建立指向本地中转端口的 ngrok HTTPS 端点（官方 Go SDK，
+   `golang.ngrok.com/ngrok/v2`），SDK 直接返回分配的公网 URL，界面
+   展示公网入口（`https://<ngrok-host>/t/{tunnelID}`，可复制）。
+   服务端停止时端点一并关闭。失败——token 缺失/无效、ngrok 云端不
+   可达——以对话框 + 日志条目呈现。该模式下 TLS 在 ngrok 边缘终
+   结，本地监听可保持回环明文 HTTP。
 3. **一键生成客户端配置。** 生成一份客户端 `config.json`：`server`
    填入当前公网地址（ngrok 或直连 HTTPS 地址派生 `wss://`；本地明
    文暴露则 `ws://`），其余字段留空由运维在客户端机器上补填。经文
@@ -368,6 +368,6 @@ func (s *Server) handleRelay(w http.ResponseWriter, r *http.Request) {
 13. GUI 客户端请求日志区展示最近请求/状态/重连日志，清空配置后重新连接可生成新 tunnelID。
 14. 质量门槛全部干净通过：`go vet ./...`；golangci-lint 零问题（depguard 强制依赖白名单）；`go test -race` 跑全量测试且 `internal/` 语句覆盖率 ≥ 70%；服务端与 CLI 客户端在 windows/linux/darwin（amd64 与 arm64）上免 cgo 交叉编译通过；`build.sh` 一键产出服务端二进制、跨平台 CLI 二进制与本机 GUI 二进制。
 15. `selftunnel-server-gui` 从设置表单启动内嵌服务端；`GET /healthz` 正常应答，隧道接入与中转行为与 CLI 服务端完全一致；Stop 优雅关停监听并按 §3.1 关闭会话。
-16. 使用有效 ngrok authtoken 时，一键暴露得到可用的公网 https 入口：客户端经该入口中转请求成功；停止服务端时 ngrok 子进程一并停止；无效 token 有明确的错误对话框。
+16. 使用有效 ngrok authtoken 时，一键暴露得到可用的公网 https 入口：客户端经该入口中转请求成功；停止服务端时 ngrok 端点一并关闭；无效 token 有明确的错误对话框。
 17. 生成的客户端配置文件可被 `selftunnel-client` 加载（并预填 GUI 客户端表单），除目标地址外无需修改即可连接。
 18. 会话列表实时显示在线客户端的计数（累计转发、接入时间、目标地址）；断开使所选会话下线——其 pending 请求 502 失败而其他隧道不受影响——离线隧道保留在列表中；日志面板支持级别与文本过滤。

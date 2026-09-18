@@ -8,6 +8,8 @@
 #   selftunnel-client-<goos>-<goarch>[.exe]        (CGO-free)
 #   selftunnel-client-gui-<goos>-<goarch>[.exe]    (cgo; skipped with --no-gui)
 #   selftunnel-server-gui-<goos>-<goarch>[.exe]    (cgo; skipped with --no-gui)
+#   selftunnel-{client,server}.app                 (darwin only)
+#   selftunnel-{client,server}-darwin-<goarch>.dmg (darwin only)
 #
 # GUI platform rules (spec §6.4 / README):
 #   - linux:   built natively — the runner's arch must match goarch
@@ -90,5 +92,17 @@ CGO_ENABLED=1 GOOS="$GOOS_TARGET" GOARCH="$GOARCH_TARGET" \
   go build -ldflags="$GUI_LDFLAGS" \
   -o "dist/selftunnel-server-gui-${GOOS_TARGET}-${GOARCH_TARGET}${SUFFIX}" \
   ./cmd/selftunnel-server-gui
+
+# macOS runners ship hdiutil/codesign, so the .app + DMG packaging runs in
+# the pipeline exactly as it does locally.
+if [ "$GOOS_TARGET" = "darwin" ]; then
+  echo "==> Packaging .app bundles and DMG images"
+  scripts/release/package-darwin.sh \
+    "dist/selftunnel-client-gui-${GOOS_TARGET}-${GOARCH_TARGET}" \
+    "selftunnel-client" "com.mgwn.selftunnel.client"
+  scripts/release/package-darwin.sh \
+    "dist/selftunnel-server-gui-${GOOS_TARGET}-${GOARCH_TARGET}" \
+    "selftunnel-server" "com.mgwn.selftunnel.server"
+fi
 
 ls -l dist/
